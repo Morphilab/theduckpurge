@@ -1,0 +1,41 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run ShellCheck (all .sh and .bats files)
+        run: |
+          shellcheck --version
+          shellcheck theduckpurge
+          shellcheck install.sh
+          shellcheck test/test_theduckpurge.bats
+
+  bats:
+    name: Bats Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mat2 libimage-exiftool-perl ffmpeg bats
+
+      - name: Setup Bats helpers
+        run: |
+          mkdir -p test/test_helper
+          git clone --depth 1 https://github.com/bats-core/bats-support.git test/test_helper/bats-support
+          git clone --depth 1 https://github.com/bats-core/bats-assert.git  test/test_helper/bats-assert
+
+      - name: Run Bats tests
+        run: bats --print-output-on-failure test/test_theduckpurge.bats

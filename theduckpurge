@@ -1,0 +1,557 @@
+#!/usr/bin/env bash
+# =============================================================================
+# theduckpurge v1.0.0 — Secure Metadata Sanitizer
+# =============================================================================
+# Author: morphilab
+# Project: https://github.com/morphilab/theduckpurge
+# License: MIT
+
+set -euo pipefail
+IFS=$'\n\t'
+
+# ============================= CONFIGURATION ================================
+readonly VERSION="1.0.0"
+SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
+readonly SCRIPT_NAME
+readonly MAX_FILE_SIZE=104857600  # 100 MB
+
+LEVEL="standard"
+BACKUP=false RENAME=false RECURSIVE=false QUIET=false ZERO_TRACE=false
+CHECK_ONLY=false DRY_RUN=false FORCE=false
+
+# Counters (used across modes):
+#   TOTAL           — all files evaluated
+#   FAILED          — processing errors
+#   SKIPPED         — unsupported format, too large, symlink
+# Cleaning mode counters:
+#   CLEANED         — file fully cleaned
+#   REENCODED       — file was re-encoded (paranoid level only)
+# Check‑only mode counters (mutually exclusive with above):
+#   VERIFIED_CLEAN  — file had no metadata
+#   VERIFIED_DIRTY  — file had metadata
+# Dry‑run mode counter:
+#   DRY_COUNT       — files that would be processed
+# Backup counter (incremented per file, avoids a find call in summary):
+declare -i TOTAL=0 CLEANED=0 FAILED=0 SKIPPED=0 REENCODED=0
+declare -i VERIFIED_CLEAN=0 VERIFIED_DIRTY=0
+declare -i DRY_COUNT=0 BACKUP_COUNT=0 BATCH_TOTAL=0
+
+TEMP_DIR=""
+BACKUP_DIR=""
+declare -a INPUT_PATHS=()
+
+# ============================= COLORS & LOGGING =============================
+init_colors() {
+    if [[ -t 2 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+        COLOR_SUPPORT=true
+        RED='\033[0;31m' GREEN='\033[0;32m' YELLOW='\033[0;33m' RESET='\033[0m'
+    else
+        COLOR_SUPPORT=false
+        RED='' GREEN='' YELLOW='' RESET=''
+    fi
+}
+
+log() {
+    local level="$1" message="$2"
+    [[ "$QUIET" == true && "$level" != "ERROR" && "$level" != "WARN" ]] && return 0
+
+    local prefix="" color=""
+    case "$level" in
+        ERROR)   prefix="✗" color="$RED" ;;
+        WARN)    prefix="⚠" color="$YELLOW" ;;
+        SUCCESS) prefix="✓" color="$GREEN" ;;
+        INFO)    prefix="•" ;;
+        *)       prefix="•" ;;
+    esac
+
+    if [[ "$COLOR_SUPPORT" == true ]]; then
+        printf "%b%s %s%b\n" "$color" "$prefix" "$message" "$RESET" >&2
+    else
+        printf "%s %s\n" "$prefix" "$message" >&2
+    fi
+}
+
+# ============================= UTILITIES ====================================
+command_exists() { command -v "$1" >/dev/null 2>&1; }
+
+get_file_size() {
+    local size=0
+    if command_exists stat; then
+        size="$(stat -c%s "$1" 2>/dev/null || echo 0)"
+    fi
+    if [[ $size -eq 0 ]]; then
+        size="$(wc -c < "$1" 2>/dev/null || echo 0)"
+    fi
+    echo "$size"
+}
+
+get_extension() {
+    local ext="${1##*.}"
+    printf '%s' "${ext,,}"
+}
+
+is_supported_format() {
+    local ext; ext="$(get_extension "$1")"
+    case "$ext" in
+        pdf|jpg|jpeg|png|gif|bmp|tiff|tif \
+        |doc|docx|xls|xlsx|ppt|pptx|odt|ods|odp \
+        |mp3|mp4|avi|mov|mkv|flac|wav|m4a|wmv)
+            return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+check_file_safety() {
+    local file="$1"
+    if [[ -L "$file" ]]; then
+        log ERROR "Symlink detected and rejected: $file"
+        return 1
+    fi
+    if [[ ! -f "$file" ]]; then
+        log ERROR "Not a regular file: $file"
+        return 1
+    fi
+    if [[ ! -r "$file" ]]; then
+        log ERROR "No read permission: $file"
+        return 1
+    fi
+    return 0
+}
+
+check_dependencies() {
+    local missing=() broken=()
+    if command_exists mat2; then
+        mat2 --help >/dev/null 2>&1 || broken+=("mat2 (unresponsive)")
+    else
+        missing+=("mat2")
+    fi
+    if command_exists exiftool; then
+        exiftool -ver >/dev/null 2>&1 || broken+=("exiftool (unresponsive)")
+    else
+        missing+=("exiftool")
+    fi
+    if [[ ${#missing[@]} -gt 0 || ${#broken[@]} -gt 0 ]]; then
+        log ERROR "Dependency issues:"
+        [[ ${#missing[@]} -gt 0 ]] && log ERROR "  Missing: ${missing[*]}"
+        [[ ${#broken[@]} -gt 0 ]] && log ERROR "  Unresponsive: ${broken[*]}"
+        log INFO "Install with: sudo apt install mat2 libimage-exiftool-perl"
+        exit 1
+    fi
+}
+
+# ============================= METADATA CHECKING ============================
+# Internal list of technical exiftool fields to exclude from privacy metadata count.
+readonly TECHNICAL_FIELDS=(
+    File Name Directory File Size
+    File Modification Date/Time File Access Date/Time File Inode Change Date/Time
+    File Permissions File Type File Type Extension MIME Type
+    Image Width Image Height Image Size Megapixels
+    Encoding Process Color Components Y Cb Cr Sub Sampling
+    JFIF Version Resolution Unit X Resolution Y Resolution
+    Current IPTC Digest ExifTool Version Number
+)
+# NOTE: The counting regex intentionally matches single-word fields only.
+# Multi-word fields (e.g. "JFIF Version", "X Resolution", "Create Date")
+# are technical fields that mat2 cannot remove and are not considered
+# privacy risks.
+check_metadata() {
+    local file="$1" count=0
+    if command_exists exiftool; then
+        # Build an anchored exclusion pattern, escaping regex special chars
+        local exclude="" sep=""
+        local field escaped
+        for field in "${TECHNICAL_FIELDS[@]}"; do
+            escaped="$(printf '%s' "$field" | sed 's/[][\.*^$+?{|()]/\\&/g')"
+            exclude="${exclude}${sep}^${escaped}"
+            sep="|"
+        done
+        count=$(exiftool -all -- "$file" 2>/dev/null | \
+            grep -v -E "$exclude" | \
+            grep -c -E '^[A-Za-z][A-Za-z0-9_]+[[:space:]]*:' ) || true
+    fi
+    echo "${count:-0}"
+}
+
+# ============================= CLEANING =====================================
+# Strategy: run mat2 --inplace on a file, then move result to output.
+# Flags ($@) must come before positional argument "$src".
+_mat2_inplace() {
+    local src="$1" dst="$2"
+    shift 2
+    mat2 "$@" --inplace "$src" >/dev/null 2>&1 && mv "$src" "$dst" 2>/dev/null
+}
+
+# Strategy: run mat2 (non-inplace) and locate the .cleaned output.
+# Flags ($@) must come before positional argument "$src".
+_mat2_output() {
+    local src="$1" dst="$2" base ext candidate
+    shift 2
+    mat2 "$@" "$src" >/dev/null 2>&1 || return 1
+    base="${src%.*}"
+    ext="${src##*.}"
+    candidate="${base}.cleaned.${ext}"
+    if [[ -f "$candidate" ]]; then
+        mv "$candidate" "$dst" 2>/dev/null && return 0
+    fi
+    return 1
+}
+
+clean_with_mat2() {
+    local input="$1" output="$2"
+    local mat2_opts=()
+    [[ "$LEVEL" == "light" ]] && mat2_opts+=(--light)
+
+    # Dedicated work directory so strategies never corrupt $input.
+    local work_dir copy_in
+    work_dir="$(mktemp -d --tmpdir="${TEMP_DIR}" "mat2_work_XXXXXX")" || return 1
+    copy_in="${work_dir}/$(basename "$input")"
+    cp -p "$input" "$copy_in" 2>/dev/null || { rm -rf "$work_dir"; return 1; }
+
+    # Try inplace first (fastest), fall back to non-inplace with .cleaned.
+    if _mat2_inplace "$copy_in" "$output" "${mat2_opts[@]}" \
+        || _mat2_output "$copy_in" "$output" "${mat2_opts[@]}"; then
+        rm -rf "$work_dir"
+        return 0
+    fi
+
+    rm -rf "$work_dir"
+    return 1
+}
+
+clean_with_exiftool() {
+    local file="$1"
+    exiftool -overwrite_original -all= -- "$file" >/dev/null 2>&1 || {
+        log WARN "exiftool failed to clean: $(basename "$file")"
+        return 1
+    }
+}
+
+reencode_file() {
+    command_exists ffmpeg || return 1
+    local input="$1" output="$2"
+    ffmpeg -i "$input" -map_metadata -1 -c copy "$output" >/dev/null 2>&1 && [[ -f "$output" ]]
+}
+
+clean_file() {
+    local original="$1" filename ext temp clean
+    filename="$(basename "$original")"
+    ext="${original##*.}"
+
+    temp="$(mktemp --tmpdir="${TEMP_DIR}" "tmp_XXXXXX.${ext}")" || {
+        log ERROR "Could not create temp file: $filename"; return 1
+    }
+    clean="$(mktemp --tmpdir="${TEMP_DIR}" "clean_XXXXXX.${ext}")" || {
+        rm -f "$temp" 2>/dev/null
+        log ERROR "Could not create temp file: $filename"; return 1
+    }
+
+    cp -p "$original" "$temp" || { log ERROR "Could not create working copy: $filename"; return 1; }
+
+    if [[ "$BACKUP" == true ]] && [[ -n "$BACKUP_DIR" ]]; then
+        if cp -p "$original" "${BACKUP_DIR}/${filename}_$(date +%s)" 2>/dev/null; then
+            (( ++BACKUP_COUNT ))
+        else
+            log WARN "Could not create backup for: $filename"
+        fi
+    fi
+
+    local result=0
+    case "$LEVEL" in
+        light|standard)
+            clean_with_mat2 "$temp" "$clean" || result=1
+            ;;
+        aggressive)
+            clean_with_mat2 "$temp" "$clean" && clean_with_exiftool "$clean" || result=1
+            ;;
+        paranoid)
+            if clean_with_mat2 "$temp" "$clean"; then
+                clean_with_exiftool "$clean"
+                local reencoded
+                reencoded="$(mktemp --tmpdir="${TEMP_DIR}" "re_XXXXXX.${ext}")" || {
+                    log WARN "Could not create file for re-encoding: $filename"
+                }
+                if [[ -n "$reencoded" ]] && reencode_file "$clean" "$reencoded"; then
+                    mv "$reencoded" "$clean"
+                    (( ++REENCODED ))
+                elif [[ -n "$reencoded" ]]; then
+                    log WARN "Re-encoding failed (ffmpeg may not be installed): $filename"
+                fi
+            else
+                result=1
+            fi
+            ;;
+    esac
+
+    if [[ $result -eq 0 ]]; then
+        if [[ -f "$clean" ]]; then
+            mv "$clean" "$original" || { log ERROR "Could not replace: $filename"; result=1; }
+            if [[ $result -eq 0 ]]; then
+                local remaining; remaining="$(check_metadata "$original")"
+                if [[ "$remaining" -gt 0 ]]; then
+                    log WARN "Partially cleaned: $filename ($remaining metadata remain)"
+                fi
+            fi
+        else
+            log ERROR "No cleaned file produced: $filename"
+            result=1
+        fi
+    fi
+
+    rm -f "$temp" "$clean" 2>/dev/null || true
+    return $result
+}
+
+# ============================= PROCESSING ===================================
+process_single_file() {
+    local file="$1" filename; filename="$(basename "$file")"
+
+    check_file_safety "$file" || { (( ++FAILED )); return 1; }
+
+    (( ++TOTAL ))
+
+    if [[ "$(get_file_size "$file")" -gt $MAX_FILE_SIZE ]] && [[ "$FORCE" != true ]]; then
+        log WARN "File too large: $filename"
+        (( ++SKIPPED ))
+        return 0
+    fi
+
+    if ! is_supported_format "$file"; then
+        log WARN "Unsupported format: $filename"
+        (( ++SKIPPED ))
+        return 0
+    fi
+
+    if [[ "$CHECK_ONLY" == true ]]; then
+        local count; count="$(check_metadata "$file")"
+        if [[ "$count" -le 0 ]]; then
+            log SUCCESS "Already clean: $filename"
+            (( ++VERIFIED_CLEAN ))
+        else
+            log WARN "Contains $count metadata: $filename"
+            (( ++VERIFIED_DIRTY ))
+        fi
+        return 0
+    fi
+
+    if [[ "$DRY_RUN" == true ]]; then
+        local prefix=""
+        [[ $BATCH_TOTAL -gt 0 ]] && prefix="[$TOTAL/$BATCH_TOTAL] "
+        log INFO "${prefix}[DRY RUN] Would process: $filename (level: $LEVEL)"
+        (( ++DRY_COUNT ))
+        return 0
+    fi
+
+    if [[ $BATCH_TOTAL -gt 0 ]]; then
+        log INFO "[$TOTAL/$BATCH_TOTAL] Processing: $filename (level: $LEVEL)"
+    else
+        log INFO "Processing: $filename (level: $LEVEL)"
+    fi
+
+    if clean_file "$file"; then
+        if [[ "$RENAME" == true ]]; then
+            local new_name
+            new_name="$(dirname "$file")/clean_$(date +%s)_$filename"
+            if mv "$file" "$new_name" 2>/dev/null; then
+                log SUCCESS "Cleaned and renamed: $filename → $(basename "$new_name")"
+            else
+                log SUCCESS "Cleaned (rename failed): $filename"
+            fi
+        else
+            log SUCCESS "Cleaned: $filename"
+        fi
+        (( ++CLEANED ))
+    else
+        log ERROR "Failed to clean: $filename"
+        (( ++FAILED ))
+    fi
+    return 0
+}
+
+process_directory() {
+    local dir="$1"
+    [[ ! -d "$dir" || ! -r "$dir" ]] && { log ERROR "Directory not accessible: $dir"; return 1; }
+
+    log INFO "Processing directory: $dir"
+
+    local find_opts=("$dir" -type f)
+    [[ "$RECURSIVE" != true ]] && find_opts+=(-maxdepth 1)
+
+    local find_stderr
+    find_stderr="$(mktemp --tmpdir="${TEMP_DIR}" "find_err_XXXXXX")" 2>/dev/null
+    while IFS= read -r -d '' file; do
+        process_single_file "$file"
+    done < <(find "${find_opts[@]}" -print0 2>"${find_stderr:-/dev/null}" || true)
+    if [[ -n "$find_stderr" && -s "$find_stderr" ]]; then
+        while IFS= read -r err; do
+            log WARN "find: $err"
+        done < "$find_stderr"
+    fi
+    rm -f "$find_stderr" 2>/dev/null || true
+}
+
+# ============================= CLI ===========================================
+show_help() {
+    cat << EOF
+theduckpurge v$VERSION — Secure Metadata Sanitizer
+
+USAGE:
+  $SCRIPT_NAME [OPTIONS] [FILES|DIRECTORIES...]
+
+OPTIONS:
+  --level LEVEL     Cleaning level (light|standard|aggressive|paranoid)
+  -b, --backup      Create backups before cleaning
+  -r, --rename      Rename cleaned files
+  -R, --recursive   Process directories recursively
+  --check-only      Only verify, do not modify files
+  --dry-run         Simulate without making changes
+  --zero-trace      Traceless mode (quiet + no backups)
+  --quiet           Only show errors
+  --force           Ignore size limits
+  -h, --help        Show this help
+  -v, --version     Show version
+
+EXAMPLES:
+  $SCRIPT_NAME --check-only document.pdf
+  $SCRIPT_NAME --level paranoid -R ./my_files/
+  $SCRIPT_NAME --backup --rename image.jpg
+
+No arguments shows this help.
+EOF
+}
+
+parse_arguments() {
+    INPUT_PATHS=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --level)
+                LEVEL="${2:-}"
+                [[ ! "$LEVEL" =~ ^(light|standard|aggressive|paranoid)$ ]] && {
+                    log ERROR "Invalid level: $LEVEL"
+                    exit 1
+                }
+                shift 2 ;;
+            -b|--backup)      BACKUP=true; shift ;;
+            -r|--rename)      RENAME=true; shift ;;
+            -R|--recursive)   RECURSIVE=true; shift ;;
+            --check-only)     CHECK_ONLY=true; shift ;;
+            --dry-run)        DRY_RUN=true; shift ;;
+            --zero-trace)     ZERO_TRACE=true; QUIET=true; BACKUP=false; shift ;;
+            --quiet)          QUIET=true; shift ;;
+            --force)          FORCE=true; shift ;;
+            -h|--help)        show_help; exit 0 ;;
+            -v|--version)     echo "theduckpurge v$VERSION"; exit 0 ;;
+            --)               shift; INPUT_PATHS+=("$@"); break ;;
+            -*)               log WARN "Unknown option, treating as file: $1"; INPUT_PATHS+=("$1"); shift ;;
+            *)                INPUT_PATHS+=("$1"); shift ;;
+        esac
+    done
+}
+
+setup_temp_dir() {
+    [[ "$CHECK_ONLY" == true ]] && return 0
+    if command_exists mktemp; then
+        TEMP_DIR="$(mktemp -d --tmpdir "theduckpurge_XXXXXX")"
+    else
+        TEMP_DIR="/tmp/theduckpurge_$$_${RANDOM}_$(date +%s%N)"
+        mkdir -m 700 "$TEMP_DIR"
+    fi
+    trap 'rm -rf "$TEMP_DIR" 2>/dev/null || true' EXIT INT TERM
+}
+
+setup_backup_dir() {
+    [[ "$CHECK_ONLY" == true || "$BACKUP" != true ]] && return 0
+    BACKUP_DIR="$(pwd)/theduckpurge_backups/$(date +%Y%m%d_%H%M%S)_$$_${RANDOM}"
+    mkdir -p "$BACKUP_DIR" 2>/dev/null || { log WARN "Could not create backup directory"; BACKUP=false; }
+}
+
+show_summary() {
+    echo
+    if [[ "$CHECK_ONLY" == true ]]; then
+        printf "Evaluated: %d  |  Clean: %d  |  Dirty: %d  |  Skipped: %d  |  Failed: %d\n" \
+            "$TOTAL" "$VERIFIED_CLEAN" "$VERIFIED_DIRTY" "$SKIPPED" "$FAILED"
+    elif [[ "$DRY_RUN" == true ]]; then
+        printf "Evaluated: %d  |  Simulated: %d  |  Skipped: %d  |  Failed: %d\n" \
+            "$TOTAL" "$DRY_COUNT" "$SKIPPED" "$FAILED"
+    else
+        printf "Evaluated: %d  |  Cleaned: %d  |  Skipped: %d  |  Failed: %d\n" \
+            "$TOTAL" "$CLEANED" "$SKIPPED" "$FAILED"
+        [[ "$REENCODED" -gt 0 ]] && log INFO "Re-encoded: $REENCODED"
+    fi
+
+    if [[ -n "$BACKUP_DIR" ]] && [[ "$BACKUP" == true ]] && [[ $BACKUP_COUNT -gt 0 ]]; then
+        echo "Backups: $BACKUP_COUNT file(s) at $BACKUP_DIR"
+    fi
+
+    if [[ $FAILED -eq 0 && $TOTAL -gt 0 ]]; then
+        if [[ "$CHECK_ONLY" == true ]]; then
+            log SUCCESS "Verification completed."
+        elif [[ "$DRY_RUN" == true ]]; then
+            log INFO "Simulation completed."
+        else
+            log SUCCESS "Cleanup completed."
+        fi
+    elif [[ $FAILED -gt 0 ]]; then
+        log WARN "Completed with $FAILED error(s)."
+    else
+        log INFO "No files were processed."
+    fi
+}
+
+# ============================= MAIN ==========================================
+main() {
+    init_colors
+
+    if [[ $# -eq 0 ]]; then
+        show_help
+        exit 0
+    fi
+
+    parse_arguments "$@"
+
+    if [[ ${#INPUT_PATHS[@]} -eq 0 ]]; then
+        log ERROR "No files or directories specified"
+        exit 1
+    fi
+
+    [[ "$ZERO_TRACE" == true ]] && { BACKUP=false; QUIET=true; }
+    [[ "$QUIET" != true ]] && echo "theduckpurge v$VERSION — $LEVEL"
+
+    check_dependencies
+    setup_temp_dir
+    setup_backup_dir
+
+    # Pre-count total files for progress indicator (null-delimited for safety)
+    BATCH_TOTAL=0
+    for p in "${INPUT_PATHS[@]}"; do
+        if [[ -f "$p" ]]; then
+            (( ++BATCH_TOTAL ))
+        elif [[ -d "$p" ]]; then
+            local maxdepth=() cnt=0
+            [[ "$RECURSIVE" != true ]] && maxdepth=(-maxdepth 1)
+            cnt="$(find "$p" -type f "${maxdepth[@]}" -print0 2>/dev/null | tr -d -c '\0' | wc -c)" || true
+            BATCH_TOTAL=$(( BATCH_TOTAL + cnt ))
+        fi
+    done
+
+    for path in "${INPUT_PATHS[@]}"; do
+        if [[ -L "$path" ]]; then
+            log WARN "Symlink skipped: $path"
+            (( ++SKIPPED ))
+        elif [[ -f "$path" ]]; then
+            process_single_file "$path"
+        elif [[ -d "$path" ]]; then
+            process_directory "$path"
+        else
+            log ERROR "Does not exist: $path"
+            (( ++FAILED ))
+        fi
+    done
+
+    show_summary
+    exit $(( FAILED > 0 ))
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
