@@ -194,6 +194,7 @@ teardown() {
 }
 
 @test "library mode: sourcing exposes functions" {
+    # shellcheck disable=SC1091
     source "$TEST_TMP/theduckpurge"
     command -v check_metadata
     command -v clean_file
