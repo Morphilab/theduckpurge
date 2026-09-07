@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# theduckpurge v1.2.0 — Secure Metadata Sanitizer
+# theduckpurge v1.3.0 — Secure Metadata Sanitizer
 # =============================================================================
 # Author: morphilab
 # Project: https://github.com/morphilab/theduckpurge
@@ -10,7 +10,7 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # ============================= CONFIGURATION ================================
-readonly VERSION="1.2.0"
+readonly VERSION="1.3.0"
 SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
 readonly SCRIPT_NAME
 MAX_FILE_SIZE=104857600  # 100 MB

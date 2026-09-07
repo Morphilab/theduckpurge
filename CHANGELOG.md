@@ -4,10 +4,11 @@ All notable versions of the project are documented in this file.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.3.0] - 2026-09-07
 
 ### Added
 - JSON summary now includes `verified_clean`/`verified_dirty` counts in check-only mode and a `simulated` count in dry-run mode
+- Installer one-liner now works end-to-end: the SHA256 checksum (`theduckpurge.sha256`) is published on the repository branch and kept in sync with the script (a tracked integrity test guards it)
 
 ### Fixed
 - Invalid `level` in a config file aborts with an error instead of being silently ignored (fail-closed)
@@ -17,7 +18,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - Exclusion matching is safe for file names that look like command-line flags (e.g. `-n`)
 
 ### Changed
-- Tests: +14 (total: 79)
+- Tests: +15 (total: 80)
 
 ## [1.2.0] - 2026-08-22
 

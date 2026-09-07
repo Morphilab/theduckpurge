@@ -30,7 +30,7 @@ teardown() {
 @test "shows version" {
     run "$TEST_TMP/theduckpurge" --version
     assert_success
-    assert_output "theduckpurge v1.2.0"
+    assert_output "theduckpurge v1.3.0"
 }
 
 @test "shows help" {
@@ -694,4 +694,16 @@ run_installer() {
     run "$TEST_TMP/theduckpurge" --check-only --exclude '^-n$' "$TEST_TMP/-n"
     assert_output --partial "Excluded:"
     refute_output --partial "Unsupported format"
+}
+
+# ---- Repository integrity ----
+
+@test "tracked checksum matches the script" {
+    # The installer downloads theduckpurge.sha256 from this branch;
+    # it must always describe the exact theduckpurge file tracked here.
+    local repo_root="$BATS_TEST_DIRNAME/.."
+    local expected tracked
+    expected="$(sha256sum "$repo_root/theduckpurge" | cut -d' ' -f1)"
+    tracked="$(cut -d' ' -f1 "$repo_root/theduckpurge.sha256")"
+    assert_equal "$tracked" "$expected"
 }

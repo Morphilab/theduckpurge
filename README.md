@@ -6,7 +6,7 @@ Protect your privacy by removing metadata from PDFs, images, Office documents, a
 
 ![GitHub Actions](https://github.com/morphilab/theduckpurge/workflows/Tests/badge.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Version](https://img.shields.io/badge/version-1.2.0-brightgreen)
+![Version](https://img.shields.io/badge/version-1.3.0-brightgreen)
 ![Shell](https://img.shields.io/badge/shell-bash-89e051)
 
 ## ✨ Features
@@ -91,7 +91,7 @@ Author                         : TheDuckPurge Test Suite
 
 ```text
 $ theduckpurge --level standard photo.jpg
-theduckpurge v1.2.0 — standard
+theduckpurge v1.3.0 — standard
 • [1/1] Processing: photo.jpg (level: standard)
 ✓ Cleaned: photo.jpg
 
@@ -166,9 +166,10 @@ for `paranoid`; the tool refuses to run that level without it.
 ```
 theduckpurge/
 ├── theduckpurge               # Main script
+├── theduckpurge.sha256        # SHA256 checksum (verified by the installer)
 ├── install.sh                 # One-liner installer with SHA256
 ├── test/
-│   ├── test_theduckpurge.bats # 79 Bats tests
+│   ├── test_theduckpurge.bats # 80 Bats tests
 │   └── fixtures/              # Real test files
 ├── .github/workflows/
 │   ├── test.yml               # CI: ShellCheck + Bats (matrix)
@@ -181,7 +182,7 @@ theduckpurge/
 
 ## 🧪 Tests
 
-The project includes **79 automated tests** using [Bats](https://github.com/bats-core/bats-core). They cover argument parsing, metadata detection, dry-run, quiet mode, real cleaning, backup, rename, symlink rejection, recursive processing, paranoid mode, config files, exclusions, JSON output, report mode, permission error handling, and more.
+The project includes **80 automated tests** using [Bats](https://github.com/bats-core/bats-core). They cover argument parsing, metadata detection, dry-run, quiet mode, real cleaning, backup, rename, symlink rejection, recursive processing, paranoid mode, config files, exclusions, JSON output, report mode, permission error handling, checksum integrity, and more.
 
 ```bash
 # Install test dependencies (once)
@@ -233,5 +234,5 @@ sudo apt install mat2 libimage-exiftool-perl ffmpeg
 ---
 
 **License:** MIT  
-**Version:** 1.2.0  
+**Version:** 1.3.0  
 **Author:** morphilab
