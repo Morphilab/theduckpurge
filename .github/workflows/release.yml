@@ -1,0 +1,33 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Generate SHA256 checksum
+        run: |
+          sha256sum theduckpurge > theduckpurge.sha256
+          echo "Checksum generated:"
+          cat theduckpurge.sha256
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            theduckpurge
+            theduckpurge.sha256
+            install.sh
+          generate_release_notes: true
+          draft: false
+          prerelease: false

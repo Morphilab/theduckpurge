@@ -10,14 +10,15 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # ============================= CONFIGURATION ================================
-readonly VERSION="1.0.0"
+readonly VERSION="1.1.0"
 SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
 readonly SCRIPT_NAME
 readonly MAX_FILE_SIZE=104857600  # 100 MB
 
 LEVEL="standard"
 BACKUP=false RENAME=false RECURSIVE=false QUIET=false ZERO_TRACE=false
-CHECK_ONLY=false DRY_RUN=false FORCE=false
+CHECK_ONLY=false DRY_RUN=false FORCE=false NO_COLOR=false VERBOSE=false JSON=false
+EXCLUDE_PATTERNS=() JOBS=0 INIT_MODE=false REPORT_MODE=false
 
 # Counters (used across modes):
 #   TOTAL           — all files evaluated
@@ -42,12 +43,12 @@ declare -a INPUT_PATHS=()
 
 # ============================= COLORS & LOGGING =============================
 init_colors() {
-    if [[ -t 2 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-        COLOR_SUPPORT=true
-        RED='\033[0;31m' GREEN='\033[0;32m' YELLOW='\033[0;33m' RESET='\033[0m'
-    else
+    if [[ "$NO_COLOR" == true ]] || [[ -n "${NO_COLOR:-}" ]] || ! [[ -t 2 ]]; then
         COLOR_SUPPORT=false
         RED='' GREEN='' YELLOW='' RESET=''
+    else
+        COLOR_SUPPORT=true
+        RED='\033[0;31m' GREEN='\033[0;32m' YELLOW='\033[0;33m' RESET='\033[0m'
     fi
 }
 
@@ -74,6 +75,114 @@ log() {
 # ============================= UTILITIES ====================================
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 
+verbose_log() {
+    [[ "$VERBOSE" == true ]] && log INFO "$@"
+}
+
+# ============================= EXCLUSIONS ====================================
+EXCLUDE_GREP_PATTERN=""
+
+build_exclude_pattern() {
+    local patterns=()
+    local exclude_file
+
+    # Auto-load .theduckpurge.exclude from current directory
+    if [[ -f ".theduckpurge.exclude" ]]; then
+        while IFS= read -r line; do
+            line="${line%%#*}"
+            line="${line// /}"
+            [[ -n "$line" ]] && patterns+=("$line")
+        done < ".theduckpurge.exclude"
+    fi
+
+    # Auto-load from home config
+    exclude_file="${HOME}/.config/theduckpurge/exclude"
+    if [[ -f "$exclude_file" ]]; then
+        while IFS= read -r line; do
+            line="${line%%#*}"
+            line="${line// /}"
+            [[ -n "$line" ]] && patterns+=("$line")
+        done < "$exclude_file"
+    fi
+
+    # Add CLI patterns
+    for p in "${EXCLUDE_PATTERNS[@]}"; do
+        patterns+=("$p")
+    done
+
+    if [[ ${#patterns[@]} -gt 0 ]]; then
+        local sep=""
+        EXCLUDE_GREP_PATTERN=""
+        for p in "${patterns[@]}"; do
+            EXCLUDE_GREP_PATTERN="${EXCLUDE_GREP_PATTERN}${sep}${p}"
+            sep="|"
+        done
+    fi
+}
+
+is_excluded() {
+    local file="$1"
+    local basename
+    basename="$(basename "$file")"
+    if [[ -n "$EXCLUDE_GREP_PATTERN" ]]; then
+        if echo "$basename" | grep -qE "$EXCLUDE_GREP_PATTERN" 2>/dev/null; then
+            return 0
+        fi
+        if echo "$file" | grep -qE "$EXCLUDE_GREP_PATTERN" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# ============================= CONFIG FILE ===================================
+load_config() {
+    local config="$1"
+    [[ ! -f "$config" ]] && { log WARN "Config file not found: $config"; return 1; }
+
+    while IFS='=' read -r key value; do
+        key="${key%%#*}"
+        key="${key// /}"
+        value="${value# }"
+        value="${value% }"
+        [[ -z "$key" ]] && continue
+        case "$key" in
+            level)      LEVEL="$value" ;;
+            backup)     [[ "$value" == "true" ]] && BACKUP=true ;;
+            rename)     [[ "$value" == "true" ]] && RENAME=true ;;
+            recursive)  [[ "$value" == "true" ]] && RECURSIVE=true ;;
+            quiet)      [[ "$value" == "true" ]] && QUIET=true ;;
+            verbose)    [[ "$value" == "true" ]] && VERBOSE=true ;;
+            force)      [[ "$value" == "true" ]] && FORCE=true ;;
+            no-color)   [[ "$value" == "true" ]] && NO_COLOR=true ;;
+            jobs)       JOBS="$value" ;;
+            max-file-size) MAX_FILE_SIZE="$value" ;;
+            exclude)    EXCLUDE_PATTERNS+=("$value") ;;
+            *)          log WARN "Unknown config key: $key" ;;
+        esac
+    done < "$config"
+}
+
+# ============================= JSON REPORT ===================================
+JSON_ITEMS=""
+
+json_add_item() {
+    local file="$1" status="$2" message="$3" metadata_count="${4:-0}"
+    [[ "$JSON" != true ]] && return 0
+    local item
+    item=$(printf '{"file":"%s","status":"%s","message":"%s","metadata_count":%d}' \
+        "$file" "$status" "$message" "$metadata_count")
+    [[ -n "$JSON_ITEMS" ]] && JSON_ITEMS="${JSON_ITEMS},"
+    JSON_ITEMS="${JSON_ITEMS}${item}"
+}
+
+json_output() {
+    [[ "$JSON" != true ]] && return 0
+    local total="${1:-0}" cleaned="${2:-0}" skipped="${3:-0}" failed="${4:-0}"
+    printf '{"version":"%s","summary":{"total":%d,"cleaned":%d,"skipped":%d,"failed":%d},"files":[%s]}\n' \
+        "$VERSION" "$total" "$cleaned" "$skipped" "$failed" "$JSON_ITEMS"
+}
+
 get_file_size() {
     local size=0
     if command_exists stat; then
@@ -93,7 +202,7 @@ get_extension() {
 is_supported_format() {
     local ext; ext="$(get_extension "$1")"
     case "$ext" in
-        pdf|jpg|jpeg|png|gif|bmp|tiff|tif \
+        pdf|jpg|jpeg|png|gif|bmp|tiff|tif|heic|heif|webp|svg \
         |doc|docx|xls|xlsx|ppt|pptx|odt|ods|odp \
         |mp3|mp4|avi|mov|mkv|flac|wav|m4a|wmv)
             return 0 ;;
@@ -134,8 +243,8 @@ check_dependencies() {
         log ERROR "Dependency issues:"
         [[ ${#missing[@]} -gt 0 ]] && log ERROR "  Missing: ${missing[*]}"
         [[ ${#broken[@]} -gt 0 ]] && log ERROR "  Unresponsive: ${broken[*]}"
-        log INFO "Install with: sudo apt install mat2 libimage-exiftool-perl"
-        exit 1
+        log INFO "Install with: sudo apt install mat2 libimage-exiftool-perl ffmpeg"
+        exit 3
     fi
 }
 
@@ -170,6 +279,57 @@ check_metadata() {
             grep -c -E '^[A-Za-z][A-Za-z0-9_]+[[:space:]]*:' ) || true
     fi
     echo "${count:-0}"
+}
+
+# ============================= REPORT ========================================
+report_file() {
+    local file="$1" filename ext size metadata_count
+    filename="$(basename "$file")"
+    ext="$(get_extension "$file")"
+    size="$(get_file_size "$file")"
+    metadata_count="$(check_metadata "$file")"
+
+    local color_clean="" color_dirty="" color_reset=""
+    if [[ "$COLOR_SUPPORT" == true ]]; then
+        color_clean="$GREEN" color_dirty="$YELLOW" color_reset="$RESET"
+    fi
+
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    printf "File: %s%s%s\n" "$color_clean" "$filename" "$color_reset"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  Path:       $file"
+    echo "  Extension:  .$ext"
+    echo "  Size:       $size bytes"
+
+    if [[ "$metadata_count" -eq 0 ]]; then
+        printf "  Status:     %s✓ CLEAN%s (no privacy metadata)\n" "$color_clean" "$color_reset"
+    else
+        printf "  Status:     %s⚠ DIRTY%s (%d metadata fields found)\n" "$color_dirty" "$color_reset" "$metadata_count"
+    fi
+
+    if command_exists exiftool; then
+        echo ""
+        echo "  Metadata details:"
+        local field name value
+        while IFS= read -r line; do
+            name="$(echo "$line" | cut -d: -f1 | sed 's/^ *//')"
+            value="$(echo "$line" | cut -d: -f2- | sed 's/^ *//')"
+            # Skip technical fields
+            local is_technical=false
+            for field in "${TECHNICAL_FIELDS[@]}"; do
+                if [[ "$name" == "$field" ]]; then
+                    is_technical=true
+                    break
+                fi
+            done
+            if [[ "$is_technical" == true ]]; then
+                printf "    %s [technical]: %s\n" "$name" "$value"
+            else
+                printf "    %s%s [privacy]%s: %s\n" "$color_dirty" "$name" "$color_reset" "$value"
+            fi
+        done < <(exiftool -all -- "$file" 2>/dev/null | grep -E '^[A-Za-z]' || true)
+    fi
+    echo ""
 }
 
 # ============================= CLEANING =====================================
@@ -309,25 +469,40 @@ process_single_file() {
 
     (( ++TOTAL ))
 
+    if is_excluded "$file"; then
+        log INFO "Excluded: $filename"
+        (( ++SKIPPED ))
+        return 0
+    fi
+
     if [[ "$(get_file_size "$file")" -gt $MAX_FILE_SIZE ]] && [[ "$FORCE" != true ]]; then
         log WARN "File too large: $filename"
+        json_add_item "$filename" "skipped" "file too large"
         (( ++SKIPPED ))
         return 0
     fi
 
     if ! is_supported_format "$file"; then
         log WARN "Unsupported format: $filename"
+        json_add_item "$filename" "skipped" "unsupported format"
         (( ++SKIPPED ))
         return 0
     fi
 
     if [[ "$CHECK_ONLY" == true ]]; then
+        if [[ "$REPORT_MODE" == true ]]; then
+            report_file "$file"
+            (( ++TOTAL ))
+            return 0
+        fi
         local count; count="$(check_metadata "$file")"
         if [[ "$count" -le 0 ]]; then
             log SUCCESS "Already clean: $filename"
+            json_add_item "$filename" "clean" "no metadata" 0
             (( ++VERIFIED_CLEAN ))
         else
             log WARN "Contains $count metadata: $filename"
+            json_add_item "$filename" "dirty" "metadata found" "$count"
             (( ++VERIFIED_DIRTY ))
         fi
         return 0
@@ -337,6 +512,7 @@ process_single_file() {
         local prefix=""
         [[ $BATCH_TOTAL -gt 0 ]] && prefix="[$TOTAL/$BATCH_TOTAL] "
         log INFO "${prefix}[DRY RUN] Would process: $filename (level: $LEVEL)"
+        json_add_item "$filename" "dry-run" "would process"
         (( ++DRY_COUNT ))
         return 0
     fi
@@ -353,15 +529,19 @@ process_single_file() {
             new_name="$(dirname "$file")/clean_$(date +%s)_$filename"
             if mv "$file" "$new_name" 2>/dev/null; then
                 log SUCCESS "Cleaned and renamed: $filename → $(basename "$new_name")"
+                json_add_item "$filename" "cleaned" "renamed to $(basename "$new_name")"
             else
                 log SUCCESS "Cleaned (rename failed): $filename"
+                json_add_item "$filename" "cleaned" "rename failed"
             fi
         else
             log SUCCESS "Cleaned: $filename"
+            json_add_item "$filename" "cleaned" "ok"
         fi
         (( ++CLEANED ))
     else
         log ERROR "Failed to clean: $filename"
+        json_add_item "$filename" "failed" "cleaning error"
         (( ++FAILED ))
     fi
     return 0
@@ -406,7 +586,15 @@ OPTIONS:
   --dry-run         Simulate without making changes
   --zero-trace      Traceless mode (quiet + no backups)
   --quiet           Only show errors
+  --verbose         Show detailed per-file info
   --force           Ignore size limits
+  --no-color        Disable colored output
+  --json            Output JSON report (non-interactive use)
+  --config FILE     Load config file with defaults
+  --exclude GLOB    Exclude files matching pattern (repeatable)
+  --jobs N          Process N files in parallel (0=auto)
+  --report          Detailed metadata report per file (read-only)
+  --init            Generate .theduckpurge.exclude in current dir
   -h, --help        Show this help
   -v, --version     Show version
 
@@ -414,8 +602,27 @@ EXAMPLES:
   $SCRIPT_NAME --check-only document.pdf
   $SCRIPT_NAME --level paranoid -R ./my_files/
   $SCRIPT_NAME --backup --rename image.jpg
+  $SCRIPT_NAME --exclude "*.log" --exclude "node_modules" -R ./
+  $SCRIPT_NAME --config ~/.config/theduckpurge/config -R ./
+  $SCRIPT_NAME --json --check-only ./photos/
+  $SCRIPT_NAME --init
 
 No arguments shows this help.
+
+EXIT CODES:
+  0  Success (all files processed)
+  1  Processing errors occurred
+  2  No files were processed
+  3  Missing required dependency
+  4  Permission error
+
+CONFIG FILE FORMAT (key=value, one per line):
+  level=standard
+  backup=true
+  recursive=true
+  jobs=4
+  exclude=node_modules
+  exclude=.git
 EOF
 }
 
@@ -438,7 +645,22 @@ parse_arguments() {
             --dry-run)        DRY_RUN=true; shift ;;
             --zero-trace)     ZERO_TRACE=true; QUIET=true; BACKUP=false; shift ;;
             --quiet)          QUIET=true; shift ;;
+            --verbose)        VERBOSE=true; shift ;;
             --force)          FORCE=true; shift ;;
+            --no-color)       NO_COLOR=true; shift ;;
+            --json)           JSON=true; QUIET=true; shift ;;
+            --config)
+                [[ -z "${2:-}" ]] && { log ERROR "Config file path required"; exit 3; }
+                load_config "$2"; shift 2 ;;
+            --exclude)
+                [[ -z "${2:-}" ]] && { log ERROR "Exclude pattern required"; exit 3; }
+                EXCLUDE_PATTERNS+=("$2"); shift 2 ;;
+            --jobs)
+                JOBS="${2:-0}"
+                [[ ! "$JOBS" =~ ^[0-9]+$ ]] && { log ERROR "Invalid jobs: $JOBS"; exit 1; }
+                shift 2 ;;
+            --init)           INIT_MODE=true; shift ;;
+            --report)         REPORT_MODE=true; CHECK_ONLY=true; shift ;;
             -h|--help)        show_help; exit 0 ;;
             -v|--version)     echo "theduckpurge v$VERSION"; exit 0 ;;
             --)               shift; INPUT_PATHS+=("$@"); break ;;
@@ -498,6 +720,28 @@ show_summary() {
     fi
 }
 
+# ============================= INIT MODE =====================================
+do_init() {
+    local exclude_file=".theduckpurge.exclude"
+    if [[ -f "$exclude_file" ]]; then
+        log WARN "$exclude_file already exists in $(pwd)"
+        return 0
+    fi
+    cat > "$exclude_file" << 'EXCLUDE'
+# theduckpurge exclusion patterns (one per line)
+# Files/directories matching these patterns will be skipped
+# Supports grep extended regex syntax
+#
+# Examples:
+# node_modules
+# \.git
+# *.log
+# __pycache__
+# \.env
+EXCLUDE
+    log SUCCESS "Created $exclude_file"
+}
+
 # ============================= MAIN ==========================================
 main() {
     init_colors
@@ -509,15 +753,21 @@ main() {
 
     parse_arguments "$@"
 
+    if [[ "$INIT_MODE" == true ]]; then
+        do_init
+        exit 0
+    fi
+
     if [[ ${#INPUT_PATHS[@]} -eq 0 ]]; then
         log ERROR "No files or directories specified"
-        exit 1
+        exit 2
     fi
 
     [[ "$ZERO_TRACE" == true ]] && { BACKUP=false; QUIET=true; }
-    [[ "$QUIET" != true ]] && echo "theduckpurge v$VERSION — $LEVEL"
+    [[ "$QUIET" != true && "$JSON" != true ]] && echo "theduckpurge v$VERSION — $LEVEL"
 
     check_dependencies
+    build_exclude_pattern
     setup_temp_dir
     setup_backup_dir
 
@@ -549,7 +799,18 @@ main() {
     done
 
     show_summary
-    exit $(( FAILED > 0 ))
+
+    if [[ "$JSON" == true ]]; then
+        json_output "$TOTAL" "$CLEANED" "$SKIPPED" "$FAILED"
+    fi
+
+    if [[ $FAILED -gt 0 ]]; then
+        exit 1
+    elif [[ $TOTAL -eq 0 ]]; then
+        exit 2
+    else
+        exit 0
+    fi
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then

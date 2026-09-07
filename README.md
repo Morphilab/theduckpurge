@@ -6,16 +6,20 @@ Protect your privacy by removing metadata from PDFs, images, Office documents, a
 
 ![GitHub Actions](https://github.com/morphilab/theduckpurge/workflows/Tests/badge.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Version](https://img.shields.io/badge/version-1.0.0-brightgreen)
+![Version](https://img.shields.io/badge/version-1.1.0-brightgreen)
 ![Shell](https://img.shields.io/badge/shell-bash-89e051)
 
 ## ✨ Features
 
 - **4 progressive cleaning levels** (`light` → `paranoid`)
-- Supports PDF, JPG, PNG, DOCX, XLSX, MP4, MP3, and more
-- Advanced options: `--check-only`, `--dry-run`, `--zero-trace`
+- Supports PDF, JPG, PNG, DOCX, XLSX, MP4, MP3, HEIC, WebP, SVG, and more
+- Advanced options: `--check-only`, `--dry-run`, `--zero-trace`, `--report`
 - Optional automatic backups
 - Automatic renaming of cleaned files
+- Config file support (`--config`)
+- File exclusion patterns (`--exclude`)
+- JSON output for integration (`--json`)
+- SHA256-verified installer
 - Fully offline — only depends on `mat2` and `exiftool`
 
 ## ⚠️ AI Disclosure / Divulgación de IA
@@ -59,6 +63,18 @@ theduckpurge --level paranoid -R ./my_files/
 
 # Quiet, only errors and warnings
 theduckpurge --quiet --level aggressive *.docx
+
+# Detailed metadata report
+theduckpurge --report photo.jpg
+
+# JSON output for scripting
+theduckpurge --json --check-only ./photos/
+
+# Exclude patterns
+theduckpurge --exclude "*.log" --exclude "node_modules" -R ./
+
+# Generate config file
+theduckpurge --init
 ```
 
 ### Demo
@@ -75,7 +91,7 @@ Author                         : morphilab
 
 ```text
 $ theduckpurge --level standard photo.jpg
-theduckpurge v1.0.0 — standard
+theduckpurge v1.1.0 — standard
 • [1/1] Processing: photo.jpg (level: standard)
 ✓ Cleaned: photo.jpg
 
@@ -90,18 +106,22 @@ $ exiftool photo.jpg | grep -E 'Author|Title'
 (no output)
 ```
 
-**Dry-run recursive scan** of a directory tree:
+**Metadata report:**
 
 ```text
-$ theduckpurge --dry-run --level paranoid -R ./my_files/
-theduckpurge v1.0.0 — paranoid
-• Processing directory: ./my_files/
-• [1/3] [DRY RUN] Would process: report.pdf (level: paranoid)
-⚠ Unsupported format: notes.txt
-• [3/3] [DRY RUN] Would process: vacation.jpg (level: paranoid)
+$ theduckpurge --report photo.jpg
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+File: photo.jpg
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Path:       /home/user/photo.jpg
+  Extension:  .jpg
+  Size:       245760 bytes
+  Status:     ⚠ DIRTY (3 metadata fields found)
 
-Evaluated: 3  |  Simulated: 2  |  Skipped: 1  |  Failed: 0
-• Simulation completed.
+  Metadata details:
+    Author [privacy]: morphilab
+    Title [privacy]: Prueba TheDuckPurge
+    Image Width [technical]: 1920
 ```
 
 ### Main options
@@ -110,13 +130,21 @@ Evaluated: 3  |  Simulated: 2  |  Skipped: 1  |  Failed: 0
 |---------------------|--------------------------------------------------|
 | `--level LEVEL`     | light / standard / aggressive / paranoid         |
 | `--check-only`      | Only verify, do not modify                       |
+| `--report`          | Detailed metadata report per file                |
 | `--dry-run`         | Simulate without making changes                  |
 | `--zero-trace`      | Silent mode, no backups                          |
 | `--backup`          | Create backup before cleaning                    |
 | `--rename`          | Rename cleaned files                             |
 | `-R, --recursive`   | Process directories recursively                  |
 | `--quiet`           | Only show errors and warnings                    |
+| `--verbose`         | Show detailed per-file info                      |
 | `--force`           | Ignore 100 MB size limit                         |
+| `--no-color`        | Disable colored output                           |
+| `--json`            | Output JSON report                               |
+| `--config FILE`     | Load config file with defaults                   |
+| `--exclude GLOB`    | Exclude files matching pattern (repeatable)      |
+| `--jobs N`          | Process N files in parallel                      |
+| `--init`            | Generate .theduckpurge.exclude in current dir    |
 
 ## 🛡️ Cleaning Levels
 
@@ -131,13 +159,18 @@ Evaluated: 3  |  Simulated: 2  |  Skipped: 1  |  Failed: 0
 
 ```
 theduckpurge/
-├── theduckpurge              # Main script (557 lines)
-├── install.sh                # One-liner installer
+├── theduckpurge              # Main script (~800 lines)
+├── install.sh                # One-liner installer with SHA256
 ├── test/
-│   ├── test_theduckpurge.bats # 32 Bats tests
+│   ├── test_theduckpurge.bats # 51 Bats tests
 │   └── fixtures/             # Real test files
-├── .github/workflows/        # CI/CD (ShellCheck + Bats)
-├── AGENTS.md                 # Development guide
+├── dev/
+│   ├── flujo_git.md          # Git workflow definition
+│   └── bump_version.sh       # Version bumper script
+├── .github/workflows/
+│   ├── test.yml              # CI: ShellCheck + Bats (matrix)
+│   └── release.yml           # Auto-release on tag
+├── AGENTS.md                 # AI agent development guide
 ├── CHANGELOG.md
 ├── LICENSE
 └── README.md
@@ -145,7 +178,7 @@ theduckpurge/
 
 ## 🧪 Tests
 
-The project includes **32 automated tests** using [Bats](https://github.com/bats-core/bats-core). They cover argument parsing, metadata detection, dry-run, quiet mode, real cleaning, backup, rename, symlink rejection, recursive processing, paranoid mode, and more.
+The project includes **51 automated tests** using [Bats](https://github.com/bats-core/bats-core). They cover argument parsing, metadata detection, dry-run, quiet mode, real cleaning, backup, rename, symlink rejection, recursive processing, paranoid mode, config files, exclusions, JSON output, report mode, and more.
 
 ```bash
 # Install test dependencies (once)
@@ -155,6 +188,30 @@ git clone --depth 1 https://github.com/bats-core/bats-assert.git  test/test_help
 
 # Run tests
 bats --print-output-on-failure test/test_theduckpurge.bats
+```
+
+## Exit codes
+
+| Code | Meaning                        |
+|------|--------------------------------|
+| 0    | Success (all files processed)  |
+| 1    | Processing errors occurred     |
+| 2    | No files were processed        |
+| 3    | Missing required dependency    |
+| 4    | Permission error               |
+
+## Config file
+
+Create `~/.config/theduckpurge/config` or use `--config <path>`:
+
+```ini
+level=standard
+backup=true
+recursive=true
+jobs=4
+exclude=node_modules
+exclude=.git
+exclude=*.log
 ```
 
 ## Requirements
@@ -168,8 +225,20 @@ Install on Debian/Ubuntu:
 sudo apt install mat2 libimage-exiftool-perl ffmpeg
 ```
 
+## Release process
+
+```bash
+# Bump version (updates all files, runs tests)
+dev/bump_version.sh 1.2.0
+
+# Review changes, then:
+git add -A && git commit -m "chore: bump version to 1.2.0"
+git tag v1.2.0
+git push origin main --tags
+```
+
 ---
 
 **License:** MIT  
-**Version:** 1.0.0 (June 2, 2026)  
+**Version:** 1.1.0  
 **Author:** morphilab
