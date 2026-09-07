@@ -6,7 +6,7 @@ Protect your privacy by removing metadata from PDFs, images, Office documents, a
 
 ![GitHub Actions](https://github.com/morphilab/theduckpurge/workflows/Tests/badge.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Version](https://img.shields.io/badge/version-1.1.0-brightgreen)
+![Version](https://img.shields.io/badge/version-1.2.0-brightgreen)
 ![Shell](https://img.shields.io/badge/shell-bash-89e051)
 
 ## ✨ Features
@@ -142,18 +142,24 @@ File: photo.jpg
 | `--no-color`        | Disable colored output                           |
 | `--json`            | Output JSON report                               |
 | `--config FILE`     | Load config file with defaults                   |
-| `--exclude GLOB`    | Exclude files matching pattern (repeatable)      |
-| `--jobs N`          | Process N files in parallel                      |
+| `--exclude PATTERN` | Exclude files matching ERE regex (repeatable)    |
 | `--init`            | Generate .theduckpurge.exclude in current dir    |
+
+> Note: an older `--jobs N` flag is still accepted but not implemented; the tool runs sequentially and prints a warning.
 
 ## 🛡️ Cleaning Levels
 
-| Level         | Tools used                       | Speed        | Security       |
-|---------------|----------------------------------|--------------|----------------|
-| **light**     | mat2 --light                     | Very fast    | Basic          |
-| **standard**  | mat2 (default)                   | Fast         | Good           |
-| **aggressive**| mat2 + exiftool                  | Medium       | Very good      |
-| **paranoid**  | mat2 + exiftool + re-encode     | Slow         | **Maximum**    |
+| Level         | Tools used                                    | Speed     | Security    |
+|---------------|-----------------------------------------------|-----------|-------------|
+| **light**     | mat2 --light                                  | Very fast | Basic       |
+| **standard**  | mat2 (default)                                | Fast      | Good        |
+| **aggressive**| mat2 + exiftool                               | Medium    | Very good   |
+| **paranoid**  | mat2 + exiftool + ffmpeg true re-encode       | Slow      | **Maximum** |
+
+`paranoid` re-encodes media with real codecs (video: H.264/AAC, images: full pixel
+re-encode), stripping metadata at container *and* stream level. If a format cannot
+be re-encoded, a remux fallback is used and warned about. `ffmpeg` is **required**
+for `paranoid`; the tool refuses to run that level without it.
 
 ## 📂 Project structure
 
@@ -208,11 +214,13 @@ Create `~/.config/theduckpurge/config` or use `--config <path>`:
 level=standard
 backup=true
 recursive=true
-jobs=4
 exclude=node_modules
 exclude=.git
 exclude=*.log
 ```
+
+Exclusion patterns use **extended regular expressions** (ERE, `grep -E` syntax)
+and match against the file basename or full path.
 
 ## Requirements
 

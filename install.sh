@@ -13,13 +13,18 @@ TARGET="/usr/local/bin/theduckpurge"
 TMPFILE=""
 CHECKSUM_FILE=""
 SKIP_VERIFY=false
+ASSUME_YES=false
 
+# NOTE: the checksum is served from the same origin as the binary, so it
+# protects against download corruption, not against a compromised repository.
 for arg in "$@"; do
     case "$arg" in
         --skip-verify) SKIP_VERIFY=true ;;
+        --yes|-y) ASSUME_YES=true ;;
         --help|-h)
-            echo "Usage: install.sh [--skip-verify]"
+            echo "Usage: install.sh [--skip-verify] [--yes]"
             echo "  --skip-verify  Skip SHA256 checksum verification"
+            echo "  --yes, -y      Overwrite existing installation without prompt"
             exit 0 ;;
     esac
 done
@@ -36,9 +41,30 @@ if ! command -v curl &>/dev/null; then
     exit 1
 fi
 
+confirm_overwrite() {
+    [[ "$ASSUME_YES" == true ]] && return 0
+    local reply=""
+    if [[ -t 0 ]]; then
+        read -r -p "⚠ $TARGET already exists. Overwrite? [y/N] " reply
+    elif [[ -e /dev/tty ]]; then
+        read -r -p "⚠ $TARGET already exists. Overwrite? [y/N] " reply </dev/tty 2>/dev/null || {
+            echo "✗ Non-interactive shell: pass --yes to overwrite." >&2
+            exit 1
+        }
+    else
+        echo "✗ Non-interactive shell: pass --yes to overwrite." >&2
+        exit 1
+    fi
+    [[ "$reply" == "y" || "$reply" == "Y" ]]
+}
+
 if [[ -f "$TARGET" ]]; then
-    read -r -p "⚠ $TARGET already exists. Overwrite? [y/N] " reply
-    [[ "$reply" != "y" && "$reply" != "Y" ]] && { echo "Installation cancelled."; exit 0; }
+    if confirm_overwrite; then
+        :
+    else
+        echo "Installation cancelled."
+        exit 0
+    fi
 fi
 
 # --- Download script ---
@@ -76,7 +102,11 @@ if [[ "$SKIP_VERIFY" != true ]]; then
         fi
         echo "✓ Checksum verified."
     else
-        echo "⚠ Could not download checksum (HTTP $HTTP_CODE). Skipping verification." >&2
+        # Fail closed: an unverifiable download must not be installed silently.
+        echo "✗ Could not download checksum (HTTP $HTTP_CODE)." >&2
+        echo "  Refusing to install an unverified binary." >&2
+        echo "  Re-run with --skip-verify to override." >&2
+        exit 1
     fi
 else
     echo "• Skipping checksum verification (--skip-verify)"

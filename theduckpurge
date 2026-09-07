@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# theduckpurge v1.0.0 — Secure Metadata Sanitizer
+# theduckpurge v1.2.0 — Secure Metadata Sanitizer
 # =============================================================================
 # Author: morphilab
 # Project: https://github.com/morphilab/theduckpurge
@@ -10,10 +10,10 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # ============================= CONFIGURATION ================================
-readonly VERSION="1.1.0"
+readonly VERSION="1.2.0"
 SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
 readonly SCRIPT_NAME
-readonly MAX_FILE_SIZE=104857600  # 100 MB
+MAX_FILE_SIZE=104857600  # 100 MB
 
 LEVEL="standard"
 BACKUP=false RENAME=false RECURSIVE=false QUIET=false ZERO_TRACE=false
@@ -36,6 +36,9 @@ EXCLUDE_PATTERNS=() JOBS=0 INIT_MODE=false REPORT_MODE=false
 declare -i TOTAL=0 CLEANED=0 FAILED=0 SKIPPED=0 REENCODED=0
 declare -i VERIFIED_CLEAN=0 VERIFIED_DIRTY=0
 declare -i DRY_COUNT=0 BACKUP_COUNT=0 BATCH_TOTAL=0
+# Set by reencode_file(): "re-encoded" (true codec re-encode) or "remuxed"
+# (stream-copy fallback — weaker guarantee, container metadata only).
+REENCODE_MODE=""
 
 TEMP_DIR=""
 BACKUP_DIR=""
@@ -75,6 +78,14 @@ log() {
 # ============================= UTILITIES ====================================
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 
+# Strip leading/trailing whitespace only (inner spaces are preserved).
+trim() {
+    local s="$1"
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    printf '%s' "$s"
+}
+
 verbose_log() {
     [[ "$VERBOSE" == true ]] && log INFO "$@"
 }
@@ -89,8 +100,7 @@ build_exclude_pattern() {
     # Auto-load .theduckpurge.exclude from current directory
     if [[ -f ".theduckpurge.exclude" ]]; then
         while IFS= read -r line; do
-            line="${line%%#*}"
-            line="${line// /}"
+            line="$(trim "${line%%#*}")"
             [[ -n "$line" ]] && patterns+=("$line")
         done < ".theduckpurge.exclude"
     fi
@@ -99,8 +109,7 @@ build_exclude_pattern() {
     exclude_file="${HOME}/.config/theduckpurge/exclude"
     if [[ -f "$exclude_file" ]]; then
         while IFS= read -r line; do
-            line="${line%%#*}"
-            line="${line// /}"
+            line="$(trim "${line%%#*}")"
             [[ -n "$line" ]] && patterns+=("$line")
         done < "$exclude_file"
     fi
@@ -108,6 +117,17 @@ build_exclude_pattern() {
     # Add CLI patterns
     for p in "${EXCLUDE_PATTERNS[@]}"; do
         patterns+=("$p")
+    done
+
+    # Fail closed on invalid ERE: silently ignoring an exclusion could cause
+    # files the user wanted excluded to be processed.
+    for p in "${patterns[@]}"; do
+        local rc=0
+        printf '\n' | grep -qE -- "$p" 2>/dev/null || rc=$?
+        if [[ $rc -eq 2 ]]; then
+            log ERROR "Invalid exclude pattern (ERE syntax): $p"
+            exit 1
+        fi
     done
 
     if [[ ${#patterns[@]} -gt 0 ]]; then
@@ -141,10 +161,9 @@ load_config() {
     [[ ! -f "$config" ]] && { log WARN "Config file not found: $config"; return 1; }
 
     while IFS='=' read -r key value; do
-        key="${key%%#*}"
+        key="$(trim "${key%%#*}")"
         key="${key// /}"
-        value="${value# }"
-        value="${value% }"
+        value="$(trim "$value")"
         [[ -z "$key" ]] && continue
         case "$key" in
             level)      LEVEL="$value" ;;
@@ -155,8 +174,13 @@ load_config() {
             verbose)    [[ "$value" == "true" ]] && VERBOSE=true ;;
             force)      [[ "$value" == "true" ]] && FORCE=true ;;
             no-color)   [[ "$value" == "true" ]] && NO_COLOR=true ;;
-            jobs)       JOBS="$value" ;;
-            max-file-size) MAX_FILE_SIZE="$value" ;;
+            jobs)       JOBS="$value"; log WARN "--jobs is accepted but not implemented yet; running sequentially" ;;
+            max-file-size)
+                if [[ "$value" =~ ^[0-9]+$ ]]; then
+                    MAX_FILE_SIZE="$value"
+                else
+                    log WARN "Invalid max-file-size in config: $value"
+                fi ;;
             exclude)    EXCLUDE_PATTERNS+=("$value") ;;
             *)          log WARN "Unknown config key: $key" ;;
         esac
@@ -166,12 +190,22 @@ load_config() {
 # ============================= JSON REPORT ===================================
 JSON_ITEMS=""
 
+json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    printf '%s' "$s"
+}
+
 json_add_item() {
     local file="$1" status="$2" message="$3" metadata_count="${4:-0}"
     [[ "$JSON" != true ]] && return 0
     local item
     item=$(printf '{"file":"%s","status":"%s","message":"%s","metadata_count":%d}' \
-        "$file" "$status" "$message" "$metadata_count")
+        "$(json_escape "$file")" "$(json_escape "$status")" "$(json_escape "$message")" "$metadata_count")
     [[ -n "$JSON_ITEMS" ]] && JSON_ITEMS="${JSON_ITEMS},"
     JSON_ITEMS="${JSON_ITEMS}${item}"
 }
@@ -246,37 +280,53 @@ check_dependencies() {
         log INFO "Install with: sudo apt install mat2 libimage-exiftool-perl ffmpeg"
         exit 3
     fi
+
+    # Paranoid level performs true re-encoding; without ffmpeg the level would
+    # silently degrade. Fail honestly instead.
+    if [[ "$LEVEL" == "paranoid" && "$CHECK_ONLY" != true && "$DRY_RUN" != true ]] \
+        && ! command_exists ffmpeg; then
+        log ERROR "Level 'paranoid' requires ffmpeg for true re-encoding."
+        log INFO "Install with: sudo apt install ffmpeg"
+        exit 3
+    fi
 }
 
 # ============================= METADATA CHECKING ============================
-# Internal list of technical exiftool fields to exclude from privacy metadata count.
+# Technical fields that carry no privacy impact. Everything NOT listed here is
+# counted as potential privacy metadata (fail-safe direction: over-reporting
+# is preferable to missing GPS coordinates or dates).
+# NOTE: multi-word names MUST be quoted here or each word becomes its own
+# element and the anchored exclusion silently stops matching.
 readonly TECHNICAL_FIELDS=(
-    File Name Directory File Size
-    File Modification Date/Time File Access Date/Time File Inode Change Date/Time
-    File Permissions File Type File Type Extension MIME Type
-    Image Width Image Height Image Size Megapixels
-    Encoding Process Color Components Y Cb Cr Sub Sampling
-    JFIF Version Resolution Unit X Resolution Y Resolution
-    Current IPTC Digest ExifTool Version Number
+    "File Name" "Directory" "File Size"
+    "File Modification Date/Time" "File Access Date/Time" "File Inode Change Date/Time"
+    "File Permissions" "File Type" "File Type Extension" "MIME Type"
+    "Image Width" "Image Height" "Image Size" "Megapixels"
+    "Encoding Process" "Color Components" "Y Cb Cr Sub Sampling"
+    "JFIF Version" "Resolution Unit" "X Resolution" "Y Resolution"
+    "Current IPTC Digest" "ExifTool Version Number"
+    "Bits Per Sample" "Exif Byte Order" "Color Space"
+    "Exif Version" "Components Configuration" "Flashpix Version" "Y Cb Cr Positioning"
+    "Samples Per Pixel" "Photometric Interpretation" "Thumbnail Offset" "Thumbnail Length"
+    "PDF Version" "Linearized" "Page Count" "Page Size"
+    "Duration" "Bit Depth" "Channels" "Channel Mode" "Sample Rate"
+    "Audio Bitrate" "Video Bitrate" "Frame Rate" "Avg Bitrate" "Codec ID" "Stream Size"
 )
-# NOTE: The counting regex intentionally matches single-word fields only.
-# Multi-word fields (e.g. "JFIF Version", "X Resolution", "Create Date")
-# are technical fields that mat2 cannot remove and are not considered
-# privacy risks.
 check_metadata() {
     local file="$1" count=0
     if command_exists exiftool; then
-        # Build an anchored exclusion pattern, escaping regex special chars
+        # Anchored whitelist exclusion (supports multi-word field names);
+        # every remaining "Field Name : value" line counts as privacy metadata.
         local exclude="" sep=""
         local field escaped
-        for field in "${TECHNICAL_FIELDS[@]}"; do
+        for field in "${TECHNICAL_FIELDS[@]}" Warning; do
             escaped="$(printf '%s' "$field" | sed 's/[][\.*^$+?{|()]/\\&/g')"
-            exclude="${exclude}${sep}^${escaped}"
+            exclude="${exclude}${sep}^${escaped}[[:space:]]*:"
             sep="|"
         done
         count=$(exiftool -all -- "$file" 2>/dev/null | \
             grep -v -E "$exclude" | \
-            grep -c -E '^[A-Za-z][A-Za-z0-9_]+[[:space:]]*:' ) || true
+            grep -c -E '^[A-Za-z][^:]*:') || true
     fi
     echo "${count:-0}"
 }
@@ -386,10 +436,36 @@ clean_with_exiftool() {
     }
 }
 
+# True re-encode per media type: metadata is stripped at container level
+# (-map_metadata -1) AND the streams are re-encoded, so codec-embedded data
+# does not survive. If the target encoder is unavailable (or the format
+# cannot be decoded), falls back to a remux (-c copy) and sets REENCODE_MODE
+# to "remuxed" so the caller can warn about the weaker guarantee.
+REENCODE_MODE=""
 reencode_file() {
+    REENCODE_MODE=""
     command_exists ffmpeg || return 1
-    local input="$1" output="$2"
-    ffmpeg -i "$input" -map_metadata -1 -c copy "$output" >/dev/null 2>&1 && [[ -f "$output" ]]
+    local input="$1" output="$2" ext
+    ext="$(get_extension "$input")"
+    local opts=(-map_metadata -1)
+    case "$ext" in
+        mp4|mov|mkv|avi|wmv)
+            opts+=(-map_chapters -1 -c:v libx264 -preset veryfast -c:a aac) ;;
+        mp3)  opts+=(-c:a libmp3lame) ;;
+        m4a)  opts+=(-c:a aac) ;;
+        flac) opts+=(-c:a flac) ;;
+        wav)  opts+=(-c:a pcm_s16le) ;;
+        *)    opts=() ;;   # images/docs: default decoder+encoder = true re-encode
+    esac
+    if ffmpeg -y -i "$input" "${opts[@]}" "$output" >/dev/null 2>&1 && [[ -f "$output" ]]; then
+        REENCODE_MODE="re-encoded"
+        return 0
+    fi
+    if ffmpeg -y -i "$input" -map_metadata -1 -map_chapters -1 -c copy "$output" >/dev/null 2>&1 && [[ -f "$output" ]]; then
+        REENCODE_MODE="remuxed"
+        return 0
+    fi
+    return 1
 }
 
 clean_file() {
@@ -408,7 +484,7 @@ clean_file() {
     cp -p "$original" "$temp" || { log ERROR "Could not create working copy: $filename"; return 1; }
 
     if [[ "$BACKUP" == true ]] && [[ -n "$BACKUP_DIR" ]]; then
-        if cp -p "$original" "${BACKUP_DIR}/${filename}_$(date +%s)" 2>/dev/null; then
+        if cp -p "$original" "${BACKUP_DIR}/${filename}_$$_$(date +%s%N)" 2>/dev/null; then
             (( ++BACKUP_COUNT ))
         else
             log WARN "Could not create backup for: $filename"
@@ -433,8 +509,11 @@ clean_file() {
                 if [[ -n "$reencoded" ]] && reencode_file "$clean" "$reencoded"; then
                     mv "$reencoded" "$clean"
                     (( ++REENCODED ))
+                    if [[ "$REENCODE_MODE" == "remuxed" ]]; then
+                        log WARN "True re-encode unavailable for this format; used remux fallback: $filename"
+                    fi
                 elif [[ -n "$reencoded" ]]; then
-                    log WARN "Re-encoding failed (ffmpeg may not be installed): $filename"
+                    log WARN "Re-encoding failed (ffmpeg may not support this format): $filename"
                 fi
             else
                 result=1
@@ -492,7 +571,6 @@ process_single_file() {
     if [[ "$CHECK_ONLY" == true ]]; then
         if [[ "$REPORT_MODE" == true ]]; then
             report_file "$file"
-            (( ++TOTAL ))
             return 0
         fi
         local count; count="$(check_metadata "$file")"
@@ -658,6 +736,7 @@ parse_arguments() {
             --jobs)
                 JOBS="${2:-0}"
                 [[ ! "$JOBS" =~ ^[0-9]+$ ]] && { log ERROR "Invalid jobs: $JOBS"; exit 1; }
+                log WARN "--jobs is accepted but not implemented yet; running sequentially"
                 shift 2 ;;
             --init)           INIT_MODE=true; shift ;;
             --report)         REPORT_MODE=true; CHECK_ONLY=true; shift ;;
@@ -688,6 +767,8 @@ setup_backup_dir() {
 }
 
 show_summary() {
+    # Machine mode: the summary lives inside json_output; keep stdout pure JSON.
+    [[ "$JSON" == true ]] && return 0
     echo
     if [[ "$CHECK_ONLY" == true ]]; then
         printf "Evaluated: %d  |  Clean: %d  |  Dirty: %d  |  Skipped: %d  |  Failed: %d\n" \

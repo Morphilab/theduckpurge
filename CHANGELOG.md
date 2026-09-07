@@ -4,6 +4,27 @@ All notable versions of the project are documented in this file.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.0] - 2026-08-22
+
+### Security (external audit fixes)
+- Metadata counting no longer misses multi-word fields — GPS coordinates, `Create Date`, etc. are now detected by `--check-only`/`--report` and post-clean verification (H-01)
+- `paranoid` level now performs true codec re-encoding per media type instead of stream-copy remux; falls back to remux with an explicit warning when a format cannot be re-encoded (H-02)
+- `paranoid` refuses to run without `ffmpeg` instead of silently degrading (exit 3) (H-02)
+- Installer fails closed when the checksum cannot be downloaded; added `--yes/-y` for non-interactive overwrites and `/dev/tty` prompt fallback for piped usage (H-04)
+
+### Fixed
+- Crash when config file contained `max-file-size` (assignment to readonly variable aborted the script); invalid values now warn gracefully (H-03)
+- `--json` output stays valid with filenames containing quotes/backslashes; summary text no longer pollutes machine-readable stdout (M-01, M-02)
+- Backups use collision-proof names (`_PID_nanoseconds`) — same-named files from different directories no longer overwrite each other (M-04)
+- Invalid exclusion regexes abort with an error instead of being silently ignored (fail-closed); spaces inside patterns are preserved; documented as ERE, not glob (M-05)
+- `--report` no longer double-counts files in the `Evaluated:` summary (L-01)
+
+### Changed
+- `--jobs N` is deprecated: accepted but unimplemented; prints a warning and runs sequentially (M-03)
+- Script header version comment is now kept in sync by `dev/bump_version.sh` (L-02)
+- README: honest paranoid-level documentation, ERE exclusion docs, removed unimplemented `--jobs`
+- Tests: 65 total (+14 covering audit fixes incl. GPS detection and hostile-filename JSON)
+
 ## [1.1.0] - 2026-08-18
 
 ### Added

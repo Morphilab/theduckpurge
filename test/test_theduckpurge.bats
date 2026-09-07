@@ -29,7 +29,7 @@ teardown() {
 @test "shows version" {
     run "$TEST_TMP/theduckpurge" --version
     assert_success
-    assert_output "theduckpurge v1.1.0"
+    assert_output "theduckpurge v1.2.0"
 }
 
 @test "shows help" {
@@ -400,4 +400,128 @@ CFG
     run "$TEST_TMP/theduckpurge" --report --json "$TEST_FILE"
     assert_success
     assert_output --partial '"version"'
+}
+
+# ---- v1.2.0 tests: security audit fixes ----
+
+@test "--config accepts max-file-size without crashing" {
+    cat > "$TEST_TMP/size_config.cfg" << 'CFG'
+level=light
+max-file-size=200000000
+CFG
+    run "$TEST_TMP/theduckpurge" --config "$TEST_TMP/size_config.cfg" --check-only "$TEST_FILE"
+    assert_success
+}
+
+@test "--config rejects invalid max-file-size gracefully" {
+    cat > "$TEST_TMP/bad_size.cfg" << 'CFG'
+max-file-size=notanumber
+CFG
+    run "$TEST_TMP/theduckpurge" --config "$TEST_TMP/bad_size.cfg" --check-only "$TEST_FILE"
+    assert_success
+    assert_output --partial "Invalid max-file-size"
+}
+
+@test "check_metadata counts multi-word fields (Create Date)" {
+    # shellcheck disable=SC1091
+    source "$TEST_TMP/theduckpurge"
+    cp "$BATS_TEST_DIRNAME/fixtures/test.jpg" "$TEST_TMP/cd_test.jpg"
+    exiftool -overwrite_original -all= "$TEST_TMP/cd_test.jpg" >/dev/null 2>&1
+    exiftool -overwrite_original -CreateDate="2020:01:01 10:00:00" "$TEST_TMP/cd_test.jpg" >/dev/null 2>&1
+    count="$(check_metadata "$TEST_TMP/cd_test.jpg")"
+    [[ "$count" -eq 1 ]]
+}
+
+@test "--check-only detects GPS coordinates as privacy metadata" {
+    cp "$BATS_TEST_DIRNAME/fixtures/test.jpg" "$TEST_TMP/gps_test.jpg"
+    exiftool -overwrite_original -GPSLatitude=40.4462 -GPSLongitude=-79.9821 "$TEST_TMP/gps_test.jpg" >/dev/null 2>&1
+    run "$TEST_TMP/theduckpurge" --check-only "$TEST_TMP/gps_test.jpg"
+    assert_success
+    assert_output --partial "Contains"
+}
+
+@test "aggressive cleaning removes GPS coordinates" {
+    cp "$BATS_TEST_DIRNAME/fixtures/test.jpg" "$TEST_TMP/gps_clean.jpg"
+    exiftool -overwrite_original -GPSLatitude=40.4462 -GPSLongitude=-79.9821 "$TEST_TMP/gps_clean.jpg" >/dev/null 2>&1
+    run "$TEST_TMP/theduckpurge" --level aggressive "$TEST_TMP/gps_clean.jpg"
+    assert_success
+    remaining="$(exiftool -b -GPSLatitude "$TEST_TMP/gps_clean.jpg" | tr -d '[:space:]')"
+    [[ -z "$remaining" ]]
+}
+
+@test "--json emits valid JSON with hostile filename" {
+    cp "$BATS_TEST_DIRNAME/fixtures/test.jpg" "$TEST_TMP/bad\"name.jpg"
+    run "$TEST_TMP/theduckpurge" --json --check-only "$TEST_TMP/bad\"name.jpg"
+    assert_success
+    # bats merges stderr into $output; extract the pure stdout JSON document
+    json_line="$(printf '%s\n' "$output" | grep '^{' | tail -n1)"
+    printf '%s' "$json_line" | python3 -m json.tool >/dev/null
+}
+
+@test "--json stdout contains no plain-text summary" {
+    run "$TEST_TMP/theduckpurge" --json --check-only "$TEST_FILE"
+    refute_output --partial "Evaluated:"
+}
+
+@test "paranoid level requires ffmpeg when cleaning (exit 3)" {
+    mkdir -p "$TEST_TMP/fakebin"
+    for d in /usr/bin /bin /usr/local/bin; do
+        [[ -d "$d" ]] || continue
+        for f in "$d"/*; do
+            b="$(basename "$f")"
+            [[ "$b" == "ffmpeg" || -e "$TEST_TMP/fakebin/$b" ]] && continue
+            ln -sf "$f" "$TEST_TMP/fakebin/$b" 2>/dev/null || true
+        done
+    done
+    cp "$BATS_TEST_DIRNAME/fixtures/test.jpg" "$TEST_TMP/pf_test.jpg"
+    run env PATH="$TEST_TMP/fakebin" "$TEST_TMP/theduckpurge" --level paranoid "$TEST_TMP/pf_test.jpg"
+    assert_failure
+    assert_output --partial "ffmpeg"
+}
+
+@test "library mode: reencode_file truly re-encodes jpeg (no stream copy)" {
+    command -v ffmpeg &>/dev/null || skip "ffmpeg not available"
+    # shellcheck disable=SC1091
+    source "$TEST_TMP/theduckpurge"
+    TEMP_DIR="$(mktemp -d)"
+    out="$TEMP_DIR/re_out.jpg"
+    reencode_file "$BATS_TEST_DIRNAME/fixtures/test.jpg" "$out"
+    [[ -s "$out" ]]
+    [[ "$REENCODE_MODE" == "re-encoded" ]]
+    rm -rf "$TEMP_DIR"
+}
+
+@test "--report evaluates each file exactly once" {
+    run "$TEST_TMP/theduckpurge" --report "$TEST_FILE" "$TEST_PDF"
+    assert_output --partial "Evaluated: 2"
+}
+
+@test "--backup preserves same-named files from different directories" {
+    mkdir -p "$TEST_TMP/src/d1" "$TEST_TMP/src/d2"
+    cp "$BATS_TEST_DIRNAME/fixtures/test.jpg" "$TEST_TMP/src/d1/img.jpg"
+    cp "$BATS_TEST_DIRNAME/fixtures/test.jpg" "$TEST_TMP/src/d2/img.jpg"
+    cd "$TEST_TMP"
+    run "$TEST_TMP/theduckpurge" --backup -R ./src
+    assert_success
+    assert_output --partial "Backups: 2"
+    n="$(find "$TEST_TMP/theduckpurge_backups" -type f 2>/dev/null | wc -l)"
+    [[ "$n" -eq 2 ]]
+}
+
+@test "invalid exclusion regex aborts instead of being ignored" {
+    run "$TEST_TMP/theduckpurge" --check-only --exclude '[unclosed' "$TEST_FILE"
+    assert_failure
+    assert_output --partial "Invalid exclude pattern"
+}
+
+@test "--exclude patterns may contain spaces" {
+    cp "$BATS_TEST_DIRNAME/fixtures/test.jpg" "$TEST_TMP/my file.jpg"
+    run "$TEST_TMP/theduckpurge" --check-only --exclude "my file" "$TEST_TMP/my file.jpg"
+    assert_output --partial "Excluded"
+}
+
+@test "--jobs warns it is not implemented yet" {
+    run "$TEST_TMP/theduckpurge" --jobs 4 --check-only "$TEST_FILE"
+    assert_success
+    assert_output --partial "not implemented"
 }
