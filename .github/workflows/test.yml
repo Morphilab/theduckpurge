@@ -30,32 +30,22 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Cache apt packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/apt
-          key: apt-${{ matrix.os }}-${{ hashFiles('.github/workflows/test.yml') }}
-          restore-keys: apt-${{ matrix.os }}-
-
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y mat2 libimage-exiftool-perl ffmpeg bats
 
-      - name: Cache Bats helpers
-        uses: actions/cache@v4
-        with:
-          path: test/test_helper
-          key: bats-helpers-${{ hashFiles('.github/workflows/test.yml') }}
-          restore-keys: bats-helpers-
-
-      - name: Setup Bats helpers
+      - name: Setup Bats helpers (pinned)
         run: |
-          if [ ! -d "test/test_helper/bats-support" ]; then
-            mkdir -p test/test_helper
-            git clone --depth 1 https://github.com/bats-core/bats-support.git test/test_helper/bats-support
-            git clone --depth 1 https://github.com/bats-core/bats-assert.git  test/test_helper/bats-assert
-          fi
+          mkdir -p test/test_helper
+          git init -q test/test_helper/bats-support
+          git -C test/test_helper/bats-support remote add origin https://github.com/bats-core/bats-support.git
+          git -C test/test_helper/bats-support fetch --depth 1 -q origin 0954abb9925cad550424cebca2b99255d4eabe96
+          git -C test/test_helper/bats-support checkout -q FETCH_HEAD
+          git init -q test/test_helper/bats-assert
+          git -C test/test_helper/bats-assert remote add origin https://github.com/bats-core/bats-assert.git
+          git -C test/test_helper/bats-assert fetch --depth 1 -q origin 697471b7a89d3ab38571f38c6c7c4b460d1f5e35
+          git -C test/test_helper/bats-assert checkout -q FETCH_HEAD
 
       - name: Run Bats tests
         run: bats --print-output-on-failure test/test_theduckpurge.bats

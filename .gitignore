@@ -1,40 +1,30 @@
-# ========================================
-# TheDuckPurge — .gitignore
-# ========================================
+# theduckpurge — .gitignore
 
-# ================== Backups (CRÍTICO) ==================
+# Backups created by the tool (setup_backup_dir)
 theduckpurge_backups/
-TheDuckPurge_backups/
-TheDuckPurge-Backups/
 *.backup
-backup-*
 
-# ================== Temporary and generated files ==================
+# Temporary and generated files
 *.tmp
 *.bak
 *~
 *.log
 *.swp
 *.swo
-output.bash
+*.temp
 
-# ================== Test directories and temp files ==================
+# Test scratch directories and Bats helpers (cloned locally, not tracked)
 test/tmp*/
 test/temp*/
 *.bats.tmp
-
-# ================== BATS test helpers (si no quieres trackearlos) ==================
 test/test_helper/bats-*
 test/test_helper/*-batslib-*
 
-# ================== Python cache (por si usas algo de python en tests) ==================
+# Python cache (tests invoke python3 for JSON validation)
 __pycache__/
 *.py[cod]
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
 
-# ================== Editor and IDE ==================
+# Editor and IDE
 .vscode/
 .idea/
 *.sublime-project
@@ -42,15 +32,10 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# ================== Environment and config ==================
+# Environment and local config
 .env
 *.env
 *.conf.local
 
-# ================== Logs ==================
+# Logs
 logs/
-*.log
-
-# ================== Otros temporales ==================
-*.temp
-.cache/
