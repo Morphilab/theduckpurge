@@ -30,8 +30,15 @@ for arg in "$@"; do
 done
 
 cleanup() {
-    [[ -n "$TMPFILE" && -f "$TMPFILE" ]] && rm -f "$TMPFILE"
-    [[ -n "$CHECKSUM_FILE" && -f "$CHECKSUM_FILE" ]] && rm -f "$CHECKSUM_FILE"
+    # if-form (not "[[ ]] && rm"): under set -e a failing guard inside the
+    # EXIT trap aborts the trap and overrides the script's real exit code
+    # (e.g. --skip-verify installs fine but exited 1).
+    if [[ -n "$TMPFILE" && -f "$TMPFILE" ]]; then
+        rm -f "$TMPFILE"
+    fi
+    if [[ -n "$CHECKSUM_FILE" && -f "$CHECKSUM_FILE" ]]; then
+        rm -f "$CHECKSUM_FILE"
+    fi
 }
 trap cleanup EXIT INT TERM
 

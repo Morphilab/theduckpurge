@@ -36,6 +36,8 @@ EXCLUDE_PATTERNS=() JOBS=0 INIT_MODE=false REPORT_MODE=false
 declare -i TOTAL=0 CLEANED=0 FAILED=0 SKIPPED=0 REENCODED=0
 declare -i VERIFIED_CLEAN=0 VERIFIED_DIRTY=0
 declare -i DRY_COUNT=0 BACKUP_COUNT=0 BATCH_TOTAL=0
+# Permission-only failures (exit code 4 contract); subset of FAILED.
+declare -i PERM_ERRORS=0
 # Set by reencode_file(): "re-encoded" (true codec re-encode) or "remuxed"
 # (stream-copy fallback — weaker guarantee, container metadata only).
 REENCODE_MODE=""
@@ -145,10 +147,13 @@ is_excluded() {
     local basename
     basename="$(basename "$file")"
     if [[ -n "$EXCLUDE_GREP_PATTERN" ]]; then
-        if echo "$basename" | grep -qE "$EXCLUDE_GREP_PATTERN" 2>/dev/null; then
+        # printf (not echo): a basename like "-n" would be parsed as an
+        # echo flag, feeding grep empty input and silently skipping the
+        # exclusion for that file.
+        if printf '%s\n' "$basename" | grep -qE "$EXCLUDE_GREP_PATTERN" 2>/dev/null; then
             return 0
         fi
-        if echo "$file" | grep -qE "$EXCLUDE_GREP_PATTERN" 2>/dev/null; then
+        if printf '%s\n' "$file" | grep -qE "$EXCLUDE_GREP_PATTERN" 2>/dev/null; then
             return 0
         fi
     fi
@@ -166,7 +171,13 @@ load_config() {
         value="$(trim "$value")"
         [[ -z "$key" ]] && continue
         case "$key" in
-            level)      LEVEL="$value" ;;
+            level)
+                if [[ "$value" =~ ^(light|standard|aggressive|paranoid)$ ]]; then
+                    LEVEL="$value"
+                else
+                    log ERROR "Invalid level in config: $value"
+                    exit 1
+                fi ;;
             backup)     [[ "$value" == "true" ]] && BACKUP=true ;;
             rename)     [[ "$value" == "true" ]] && RENAME=true ;;
             recursive)  [[ "$value" == "true" ]] && RECURSIVE=true ;;
@@ -212,9 +223,14 @@ json_add_item() {
 
 json_output() {
     [[ "$JSON" != true ]] && return 0
-    local total="${1:-0}" cleaned="${2:-0}" skipped="${3:-0}" failed="${4:-0}"
-    printf '{"version":"%s","summary":{"total":%d,"cleaned":%d,"skipped":%d,"failed":%d},"files":[%s]}\n' \
-        "$VERSION" "$total" "$cleaned" "$skipped" "$failed" "$JSON_ITEMS"
+    local total="${1:-0}" cleaned="${2:-0}" skipped="${3:-0}" failed="${4:-0}" extra=""
+    if [[ "$CHECK_ONLY" == true ]]; then
+        extra=",\"verified_clean\":$VERIFIED_CLEAN,\"verified_dirty\":$VERIFIED_DIRTY"
+    elif [[ "$DRY_RUN" == true ]]; then
+        extra=",\"simulated\":$DRY_COUNT"
+    fi
+    printf '{"version":"%s","summary":{"total":%d,"cleaned":%d,"skipped":%d,"failed":%d%s},"files":[%s]}\n' \
+        "$VERSION" "$total" "$cleaned" "$skipped" "$failed" "$extra" "$JSON_ITEMS"
 }
 
 get_file_size() {
@@ -362,8 +378,10 @@ report_file() {
         echo "  Metadata details:"
         local field name value
         while IFS= read -r line; do
-            name="$(echo "$line" | cut -d: -f1 | sed 's/^ *//')"
-            value="$(echo "$line" | cut -d: -f2- | sed 's/^ *//')"
+            # Trim BOTH sides: exiftool pads field names with trailing spaces
+            # and a leading-only trim made every field classify as [privacy].
+            name="$(echo "$line" | cut -d: -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+            value="$(echo "$line" | cut -d: -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
             # Skip technical fields
             local is_technical=false
             for field in "${TECHNICAL_FIELDS[@]}"; do
@@ -519,10 +537,18 @@ clean_file() {
                 result=1
             fi
             ;;
+        *)
+            log ERROR "Unknown cleaning level: $LEVEL"
+            result=1
+            ;;
     esac
 
     if [[ $result -eq 0 ]]; then
         if [[ -f "$clean" ]]; then
+            # Preserve the original file mode across all levels; the paranoid
+            # re-encode output is a fresh mktemp (0600) and would otherwise
+            # silently downgrade permissive modes.
+            chmod --reference="$original" "$clean" 2>/dev/null || true
             mv "$clean" "$original" || { log ERROR "Could not replace: $filename"; result=1; }
             if [[ $result -eq 0 ]]; then
                 local remaining; remaining="$(check_metadata "$original")"
@@ -544,7 +570,13 @@ clean_file() {
 process_single_file() {
     local file="$1" filename; filename="$(basename "$file")"
 
-    check_file_safety "$file" || { (( ++FAILED )); return 1; }
+    check_file_safety "$file" || {
+        if [[ -e "$file" && ! -r "$file" ]]; then
+            (( ++PERM_ERRORS ))
+        fi
+        (( ++FAILED ))
+        return 1
+    }
 
     (( ++TOTAL ))
 
@@ -637,7 +669,7 @@ process_directory() {
     local find_stderr
     find_stderr="$(mktemp --tmpdir="${TEMP_DIR}" "find_err_XXXXXX")" 2>/dev/null
     while IFS= read -r -d '' file; do
-        process_single_file "$file"
+        process_single_file "$file" || true
     done < <(find "${find_opts[@]}" -print0 2>"${find_stderr:-/dev/null}" || true)
     if [[ -n "$find_stderr" && -s "$find_stderr" ]]; then
         while IFS= read -r err; do
@@ -870,7 +902,9 @@ main() {
             log WARN "Symlink skipped: $path"
             (( ++SKIPPED ))
         elif [[ -f "$path" ]]; then
-            process_single_file "$path"
+            # || true: a per-file failure must not trip errexit and abort
+            # the whole batch before summary/exit-code logic runs.
+            process_single_file "$path" || true
         elif [[ -d "$path" ]]; then
             process_directory "$path"
         else
@@ -886,6 +920,11 @@ main() {
     fi
 
     if [[ $FAILED -gt 0 ]]; then
+        # Exit 4 only when every failure was permission-related; mixed
+        # failures keep the generic exit 1.
+        if [[ $PERM_ERRORS -eq $FAILED ]]; then
+            exit 4
+        fi
         exit 1
     elif [[ $TOTAL -eq 0 ]]; then
         exit 2

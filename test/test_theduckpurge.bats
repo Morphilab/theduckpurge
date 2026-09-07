@@ -23,6 +23,7 @@ setup() {
 }
 
 teardown() {
+    [[ -n "${INST_SANDBOX:-}" ]] && rm -rf "$INST_SANDBOX"
     rm -rf "$TEST_TMP"
 }
 
@@ -48,6 +49,27 @@ teardown() {
     run "$TEST_TMP/theduckpurge" --level invalid "$TEST_FILE"
     assert_failure
     assert_output --partial "Invalid level"
+}
+
+@test "invalid level in config aborts without destroying file" {
+    printf 'level=inexistente\n' > "$TEST_TMP/cfg"
+    local size_before size_after
+    size_before="$(stat -c%s "$TEST_FILE")"
+    run "$TEST_TMP/theduckpurge" --config "$TEST_TMP/cfg" "$TEST_FILE"
+    assert_failure
+    assert_output --partial "Invalid level"
+    size_after="$(stat -c%s "$TEST_FILE")"
+    assert_equal "$size_before" "$size_after"
+}
+
+@test "empty level value in config aborts without destroying file" {
+    printf 'level=\n' > "$TEST_TMP/cfg"
+    local size_before size_after
+    size_before="$(stat -c%s "$TEST_FILE")"
+    run "$TEST_TMP/theduckpurge" --config "$TEST_TMP/cfg" "$TEST_FILE"
+    assert_failure
+    size_after="$(stat -c%s "$TEST_FILE")"
+    assert_equal "$size_before" "$size_after"
 }
 
 @test "skips unsupported file" {
@@ -355,6 +377,7 @@ CFG
     MAT2_BACKUP="$(command -v mat2 2>/dev/null || true)"
     if [[ -n "$MAT2_BACKUP" ]]; then
         mkdir -p "$TEST_TMP/fakebin"
+        # shellcheck disable=SC2030  # each @test runs in its own subshell; PATH export is test-scoped by design
         export PATH="$TEST_TMP/fakebin:$PATH"
         # mat2 won't be in PATH, but exiftool might still work
         # We test the general behavior - if mat2 is missing, script exits 3
@@ -496,6 +519,20 @@ CFG
     assert_output --partial "Evaluated: 2"
 }
 
+@test "paranoid preserves regular file mode (644)" {
+    chmod 644 "$TEST_FILE"
+    run "$TEST_TMP/theduckpurge" --level paranoid "$TEST_FILE"
+    assert_success
+    assert_equal "644" "$(stat -c%a "$TEST_FILE")"
+}
+
+@test "paranoid preserves restrictive file mode (600)" {
+    chmod 600 "$TEST_FILE"
+    run "$TEST_TMP/theduckpurge" --level paranoid "$TEST_FILE"
+    assert_success
+    assert_equal "600" "$(stat -c%a "$TEST_FILE")"
+}
+
 @test "--backup preserves same-named files from different directories" {
     mkdir -p "$TEST_TMP/src/d1" "$TEST_TMP/src/d2"
     cp "$BATS_TEST_DIRNAME/fixtures/test.jpg" "$TEST_TMP/src/d1/img.jpg"
@@ -524,4 +561,140 @@ CFG
     run "$TEST_TMP/theduckpurge" --jobs 4 --check-only "$TEST_FILE"
     assert_success
     assert_output --partial "not implemented"
+}
+
+# ============================ install.sh ============================
+
+setup_installer_sandbox() {
+    INST_SANDBOX="$(mktemp -d)"
+    mkdir -p "$INST_SANDBOX/bin" "$INST_SANDBOX/target"
+    local script_src="$BATS_TEST_DIRNAME/../theduckpurge"
+
+    cat > "$INST_SANDBOX/bin/curl" <<STUB
+#!/usr/bin/env bash
+out=""; url=""
+while [[ \$# -gt 0 ]]; do
+    case "\$1" in
+        -o) out="\$2"; shift 2 ;;
+        *) url="\$1"; shift ;;
+    esac
+done
+if [[ "\$url" == *sha256* ]]; then
+    if [[ "\$INSTALL_STUB_NO_CHECKSUM" == 1 ]]; then
+        echo 404
+        exit 0
+    fi
+    if [[ "\$INSTALL_STUB_BAD_CHECKSUM" == 1 ]]; then
+        printf 'deadbeef  theduckpurge\n' > "\$out"
+    else
+        printf '%s  theduckpurge\n' "\$(sha256sum "$script_src" | cut -d' ' -f1)" > "\$out"
+    fi
+else
+    cp "$script_src" "\$out"
+fi
+echo 200
+STUB
+
+    cat > "$INST_SANDBOX/bin/sudo" <<'STUB'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "mv" ]]; then
+    exec mv "${2:?}" "${INSTALL_STUB_TARGET:?}/installed_theduckpurge"
+fi
+exec "$@"
+STUB
+
+    chmod +x "$INST_SANDBOX/bin/curl" "$INST_SANDBOX/bin/sudo"
+    export INSTALL_STUB_TARGET="$INST_SANDBOX/target"
+}
+
+run_installer() {
+    # shellcheck disable=SC2031  # PATH prefix is intentional per-invocation
+    run env PATH="$INST_SANDBOX/bin:$PATH" INSTALL_STUB_TARGET="$INSTALL_STUB_TARGET" \
+        bash "$BATS_TEST_DIRNAME/../install.sh" "$@"
+}
+
+@test "installer: --skip-verify installs and exits 0" {
+    setup_installer_sandbox
+    run_installer --skip-verify --yes
+    assert_success
+    [[ -x "$INSTALL_STUB_TARGET/installed_theduckpurge" ]]
+}
+
+@test "installer: valid checksum installs and exits 0" {
+    setup_installer_sandbox
+    run_installer --yes
+    assert_success
+    [[ -x "$INSTALL_STUB_TARGET/installed_theduckpurge" ]]
+}
+
+@test "installer: tampered checksum refuses to install" {
+    setup_installer_sandbox
+    INSTALL_STUB_BAD_CHECKSUM=1 run_installer --yes
+    assert_failure
+    assert_output --partial "checksum mismatch"
+    [[ ! -e "$INSTALL_STUB_TARGET/installed_theduckpurge" ]]
+}
+
+@test "installer: missing checksum fails closed" {
+    setup_installer_sandbox
+    INSTALL_STUB_NO_CHECKSUM=1 run_installer --yes
+    assert_failure
+    assert_output --partial "Could not download checksum"
+    [[ ! -e "$INSTALL_STUB_TARGET/installed_theduckpurge" ]]
+}
+
+# ============================ hardening (auditoría 2026-08-24) ============================
+
+@test "unreadable file yields permission exit code 4" {
+    [[ "$(id -u)" == "0" ]] && skip "running as root: chmod 000 is not effective"
+    chmod 000 "$TEST_FILE"
+    run "$TEST_TMP/theduckpurge" --no-color "$TEST_FILE"
+    assert_failure
+    assert_output --partial "No read permission"
+    assert_equal "$status" "4"
+}
+
+@test "unreadable file inside directory does not abort batch (exit 4)" {
+    [[ "$(id -u)" == "0" ]] && skip "running as root: chmod 000 is not effective"
+    mkdir -p "$TEST_TMP/dirx"
+    cp "$BATS_TEST_DIRNAME/fixtures/test.jpg" "$TEST_TMP/dirx/good.jpg"
+    cp "$BATS_TEST_DIRNAME/fixtures/test.jpg" "$TEST_TMP/dirx/bad.jpg"
+    chmod 000 "$TEST_TMP/dirx/bad.jpg"
+    run "$TEST_TMP/theduckpurge" --check-only --no-color "$TEST_TMP/dirx"
+    assert_failure
+    assert_equal "$status" "4"
+    assert_output --partial "good.jpg"
+}
+
+@test "--check-only --json summary includes verified counts" {
+    run "$TEST_TMP/theduckpurge" --check-only --json "$TEST_PDF"
+    assert_success
+    local counts
+    counts="$(printf '%s\n' "$output" | grep '^{' | python3 -c \
+        'import json,sys; s=json.load(sys.stdin)["summary"]; print(s.get("verified_dirty", -1), s.get("verified_clean", -1))')"
+    assert_equal "$counts" "1 0"
+}
+
+@test "--dry-run --json summary includes simulated count" {
+    run "$TEST_TMP/theduckpurge" --dry-run --json "$TEST_FILE"
+    assert_success
+    local simulated
+    simulated="$(printf '%s\n' "$output" | grep '^{' | python3 -c \
+        'import json,sys; print(json.load(sys.stdin)["summary"].get("simulated", -1))')"
+    assert_equal "$simulated" "1"
+}
+
+@test "--report classifies technical fields as technical" {
+    run "$TEST_TMP/theduckpurge" --report "$TEST_PDF"
+    assert_success
+    assert_output --partial "[technical]: PDF"
+    refute_output --partial "[privacy]: PDF"
+    refute_output --partial "[privacy]: application/pdf"
+}
+
+@test "exclusion matches dash-flag-like basename" {
+    : > "$TEST_TMP/-n"
+    run "$TEST_TMP/theduckpurge" --check-only --exclude '^-n$' "$TEST_TMP/-n"
+    assert_output --partial "Excluded:"
+    refute_output --partial "Unsupported format"
 }
