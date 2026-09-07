@@ -70,8 +70,8 @@ theduckpurge --report photo.jpg
 # JSON output for scripting
 theduckpurge --json --check-only ./photos/
 
-# Exclude patterns
-theduckpurge --exclude "*.log" --exclude "node_modules" -R ./
+# Exclude patterns (ERE regex)
+theduckpurge --exclude '\.log$' --exclude "node_modules" -R ./
 
 # Generate config file
 theduckpurge --init
@@ -83,15 +83,15 @@ theduckpurge --init
 
 ```text
 $ exiftool photo.jpg | grep -E 'Author|Title|Software'
-Title                          : Prueba TheDuckPurge
-Author                         : morphilab
+Title                          : TheDuckPurge Test Image
+Author                         : TheDuckPurge Test Suite
 ```
 
 **Clean it:**
 
 ```text
 $ theduckpurge --level standard photo.jpg
-theduckpurge v1.1.0 — standard
+theduckpurge v1.2.0 — standard
 • [1/1] Processing: photo.jpg (level: standard)
 ✓ Cleaned: photo.jpg
 
@@ -119,8 +119,8 @@ File: photo.jpg
   Status:     ⚠ DIRTY (3 metadata fields found)
 
   Metadata details:
-    Author [privacy]: morphilab
-    Title [privacy]: Prueba TheDuckPurge
+    Author [privacy]: TheDuckPurge Test Suite
+    Title [privacy]: TheDuckPurge Test Image
     Image Width [technical]: 1920
 ```
 
@@ -165,26 +165,23 @@ for `paranoid`; the tool refuses to run that level without it.
 
 ```
 theduckpurge/
-├── theduckpurge              # Main script (~800 lines)
-├── install.sh                # One-liner installer with SHA256
+├── theduckpurge               # Main script
+├── install.sh                 # One-liner installer with SHA256
 ├── test/
-│   ├── test_theduckpurge.bats # 51 Bats tests
-│   └── fixtures/             # Real test files
-├── dev/
-│   ├── flujo_git.md          # Git workflow definition
-│   └── bump_version.sh       # Version bumper script
+│   ├── test_theduckpurge.bats # 79 Bats tests
+│   └── fixtures/              # Real test files
 ├── .github/workflows/
-│   ├── test.yml              # CI: ShellCheck + Bats (matrix)
-│   └── release.yml           # Auto-release on tag
-├── AGENTS.md                 # AI agent development guide
+│   ├── test.yml               # CI: ShellCheck + Bats (matrix)
+│   └── release.yml            # Auto-release on tag
 ├── CHANGELOG.md
+├── CONTRIBUTING.md
 ├── LICENSE
 └── README.md
 ```
 
 ## 🧪 Tests
 
-The project includes **51 automated tests** using [Bats](https://github.com/bats-core/bats-core). They cover argument parsing, metadata detection, dry-run, quiet mode, real cleaning, backup, rename, symlink rejection, recursive processing, paranoid mode, config files, exclusions, JSON output, report mode, and more.
+The project includes **79 automated tests** using [Bats](https://github.com/bats-core/bats-core). They cover argument parsing, metadata detection, dry-run, quiet mode, real cleaning, backup, rename, symlink rejection, recursive processing, paranoid mode, config files, exclusions, JSON output, report mode, permission error handling, and more.
 
 ```bash
 # Install test dependencies (once)
@@ -215,8 +212,8 @@ level=standard
 backup=true
 recursive=true
 exclude=node_modules
-exclude=.git
-exclude=*.log
+exclude=\.git$
+exclude=\.log$
 ```
 
 Exclusion patterns use **extended regular expressions** (ERE, `grep -E` syntax)
@@ -233,20 +230,8 @@ Install on Debian/Ubuntu:
 sudo apt install mat2 libimage-exiftool-perl ffmpeg
 ```
 
-## Release process
-
-```bash
-# Bump version (updates all files, runs tests)
-dev/bump_version.sh 1.2.0
-
-# Review changes, then:
-git add -A && git commit -m "chore: bump version to 1.2.0"
-git tag v1.2.0
-git push origin main --tags
-```
-
 ---
 
 **License:** MIT  
-**Version:** 1.1.0  
+**Version:** 1.2.0  
 **Author:** morphilab

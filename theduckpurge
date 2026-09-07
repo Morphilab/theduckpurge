@@ -23,7 +23,7 @@ EXCLUDE_PATTERNS=() JOBS=0 INIT_MODE=false REPORT_MODE=false
 # Counters (used across modes):
 #   TOTAL           — all files evaluated
 #   FAILED          — processing errors
-#   SKIPPED         — unsupported format, too large, symlink
+#   SKIPPED         — excluded, unsupported format, too large, symlink
 # Cleaning mode counters:
 #   CLEANED         — file fully cleaned
 #   REENCODED       — file was re-encoded (paranoid level only)
@@ -32,7 +32,7 @@ EXCLUDE_PATTERNS=() JOBS=0 INIT_MODE=false REPORT_MODE=false
 #   VERIFIED_DIRTY  — file had metadata
 # Dry‑run mode counter:
 #   DRY_COUNT       — files that would be processed
-# Backup counter (incremented per file, avoids a find call in summary):
+# Backup counter (incremented per successful backup; avoids a find call in summary):
 declare -i TOTAL=0 CLEANED=0 FAILED=0 SKIPPED=0 REENCODED=0
 declare -i VERIFIED_CLEAN=0 VERIFIED_DIRTY=0
 declare -i DRY_COUNT=0 BACKUP_COUNT=0 BATCH_TOTAL=0
@@ -48,7 +48,7 @@ declare -a INPUT_PATHS=()
 
 # ============================= COLORS & LOGGING =============================
 init_colors() {
-    if [[ "$NO_COLOR" == true ]] || [[ -n "${NO_COLOR:-}" ]] || ! [[ -t 2 ]]; then
+    if [[ -n "${NO_COLOR:-}" ]] || ! [[ -t 2 ]]; then
         COLOR_SUPPORT=false
         RED='' GREEN='' YELLOW='' RESET=''
     else
@@ -116,7 +116,6 @@ build_exclude_pattern() {
         done < "$exclude_file"
     fi
 
-    # Add CLI patterns
     for p in "${EXCLUDE_PATTERNS[@]}"; do
         patterns+=("$p")
     done
@@ -382,7 +381,8 @@ report_file() {
             # and a leading-only trim made every field classify as [privacy].
             name="$(echo "$line" | cut -d: -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
             value="$(echo "$line" | cut -d: -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-            # Skip technical fields
+            # Classify against the technical whitelist (fail-safe: unlisted
+            # fields are reported as privacy metadata).
             local is_technical=false
             for field in "${TECHNICAL_FIELDS[@]}"; do
                 if [[ "$name" == "$field" ]]; then
@@ -459,7 +459,6 @@ clean_with_exiftool() {
 # does not survive. If the target encoder is unavailable (or the format
 # cannot be decoded), falls back to a remux (-c copy) and sets REENCODE_MODE
 # to "remuxed" so the caller can warn about the weaker guarantee.
-REENCODE_MODE=""
 reencode_file() {
     REENCODE_MODE=""
     command_exists ffmpeg || return 1
@@ -702,7 +701,7 @@ OPTIONS:
   --json            Output JSON report (non-interactive use)
   --config FILE     Load config file with defaults
   --exclude GLOB    Exclude files matching pattern (repeatable)
-  --jobs N          Process N files in parallel (0=auto)
+  --jobs N          Accepted for compatibility; runs sequentially
   --report          Detailed metadata report per file (read-only)
   --init            Generate .theduckpurge.exclude in current dir
   -h, --help        Show this help
@@ -712,7 +711,7 @@ EXAMPLES:
   $SCRIPT_NAME --check-only document.pdf
   $SCRIPT_NAME --level paranoid -R ./my_files/
   $SCRIPT_NAME --backup --rename image.jpg
-  $SCRIPT_NAME --exclude "*.log" --exclude "node_modules" -R ./
+  $SCRIPT_NAME --exclude '\.log$' --exclude "node_modules" -R ./
   $SCRIPT_NAME --config ~/.config/theduckpurge/config -R ./
   $SCRIPT_NAME --json --check-only ./photos/
   $SCRIPT_NAME --init
@@ -847,10 +846,10 @@ do_init() {
 #
 # Examples:
 # node_modules
-# \.git
-# *.log
+# \.git$
+# \.log$
 # __pycache__
-# \.env
+# \.env$
 EXCLUDE
     log SUCCESS "Created $exclude_file"
 }

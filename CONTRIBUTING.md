@@ -21,6 +21,12 @@ Thank you for wanting to contribute! 🎉
 Before submitting a PR, verify all tests pass:
 
 ```bash
+# First time only: clone test helpers
+mkdir -p test/test_helper
+git clone --depth 1 https://github.com/bats-core/bats-support.git test/test_helper/bats-support
+git clone --depth 1 https://github.com/bats-core/bats-assert.git test/test_helper/bats-assert
+
+# Run tests
 bats test/test_theduckpurge.bats
 ```
 

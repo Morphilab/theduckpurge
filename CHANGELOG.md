@@ -4,26 +4,40 @@ All notable versions of the project are documented in this file.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [1.2.0] - 2026-08-22
+## [Unreleased]
 
-### Security (external audit fixes)
-- Metadata counting no longer misses multi-word fields — GPS coordinates, `Create Date`, etc. are now detected by `--check-only`/`--report` and post-clean verification (H-01)
-- `paranoid` level now performs true codec re-encoding per media type instead of stream-copy remux; falls back to remux with an explicit warning when a format cannot be re-encoded (H-02)
-- `paranoid` refuses to run without `ffmpeg` instead of silently degrading (exit 3) (H-02)
-- Installer fails closed when the checksum cannot be downloaded; added `--yes/-y` for non-interactive overwrites and `/dev/tty` prompt fallback for piped usage (H-04)
+### Added
+- JSON summary now includes `verified_clean`/`verified_dirty` counts in check-only mode and a `simulated` count in dry-run mode
 
 ### Fixed
-- Crash when config file contained `max-file-size` (assignment to readonly variable aborted the script); invalid values now warn gracefully (H-03)
-- `--json` output stays valid with filenames containing quotes/backslashes; summary text no longer pollutes machine-readable stdout (M-01, M-02)
-- Backups use collision-proof names (`_PID_nanoseconds`) — same-named files from different directories no longer overwrite each other (M-04)
-- Invalid exclusion regexes abort with an error instead of being silently ignored (fail-closed); spaces inside patterns are preserved; documented as ERE, not glob (M-05)
-- `--report` no longer double-counts files in the `Evaluated:` summary (L-01)
+- Invalid `level` in a config file aborts with an error instead of being silently ignored (fail-closed)
+- `paranoid` re-encode preserves the original file permissions (a fresh re-encoded file no longer downgrades the mode)
+- Installer exits 0 after a successful `--skip-verify` install; a cleanup-trap failure no longer overrides the real exit code
+- Unreadable files report "No read permission" and no longer abort the whole batch; exit 4 is returned only when every failure was permission-related, mixed failures keep exit 1
+- Exclusion matching is safe for file names that look like command-line flags (e.g. `-n`)
 
 ### Changed
-- `--jobs N` is deprecated: accepted but unimplemented; prints a warning and runs sequentially (M-03)
-- Script header version comment is now kept in sync by `dev/bump_version.sh` (L-02)
-- README: honest paranoid-level documentation, ERE exclusion docs, removed unimplemented `--jobs`
-- Tests: 65 total (+14 covering audit fixes incl. GPS detection and hostile-filename JSON)
+- Tests: +14 (total: 79)
+
+## [1.2.0] - 2026-08-22
+
+### Security
+- Metadata counting no longer misses multi-word fields — GPS coordinates, `Create Date`, etc. are now detected by `--check-only`/`--report` and post-clean verification
+- `paranoid` level now performs true codec re-encoding per media type instead of stream-copy remux; falls back to remux with an explicit warning when a format cannot be re-encoded
+- `paranoid` refuses to run without `ffmpeg` instead of silently degrading (exit 3)
+- Installer fails closed when the checksum cannot be downloaded; added `--yes/-y` for non-interactive overwrites and `/dev/tty` prompt fallback for piped usage
+
+### Fixed
+- Crash when config file contained `max-file-size` (assignment to readonly variable aborted the script); invalid values now warn gracefully
+- `--json` output stays valid with filenames containing quotes/backslashes; summary text no longer pollutes machine-readable stdout
+- Backups use collision-proof names (`_PID_nanoseconds`) — same-named files from different directories no longer overwrite each other
+- Invalid exclusion regexes abort with an error instead of being silently ignored (fail-closed); spaces inside patterns are preserved; documented as ERE, not glob
+- `--report` no longer double-counts files in the `Evaluated:` summary
+
+### Changed
+- `--jobs N` is deprecated: accepted but unimplemented; prints a warning and runs sequentially
+- README: honest paranoid-level documentation and ERE exclusion docs; removed unimplemented `--jobs`
+- Tests: 65 total (+14 covering GPS detection and hostile-filename JSON)
 
 ## [1.1.0] - 2026-08-18
 
@@ -42,7 +56,6 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - CI matrix: tests on Ubuntu 22.04 and 24.04
 - CI dependency caching: apt packages and Bats helpers
 - GitHub Release workflow: auto-creates releases with SHA256 checksums on tag push
-- `dev/bump_version.sh`: version bumper script across all files
 - SHA256 checksum verification in installer (`--skip-verify` to bypass)
 - 19 new Bats tests (total: 51)
 

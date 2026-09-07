@@ -233,7 +233,7 @@ teardown() {
     assert_success
 }
 
-# ---- New tests (v1.0) ----
+# ---- File handling and cleaning modes ----
 
 @test "rejects symlink to directory" {
     mkdir -p "$TEST_TMP/realdir"
@@ -274,7 +274,7 @@ teardown() {
     assert_output --partial "[2/2]"
 }
 
-# ---- v1.1.0 tests: new CLI flags ----
+# ---- CLI behavior ----
 
 @test "exit code 2 when no files processed" {
     run "$TEST_TMP/theduckpurge" --check-only "$TEST_TMP/nonexistent_dir"
@@ -315,7 +315,6 @@ teardown() {
 @test "--init creates .theduckpurge.exclude" {
     cd "$TEST_TMP"
     run "$TEST_TMP/theduckpurge" --init
-    assert_success
     assert_success
     [[ -f "$TEST_TMP/.theduckpurge.exclude" ]]
 }
@@ -373,21 +372,20 @@ CFG
 }
 
 @test "exit code 3 for missing dependency" {
-    # Temporarily hide mat2
-    MAT2_BACKUP="$(command -v mat2 2>/dev/null || true)"
-    if [[ -n "$MAT2_BACKUP" ]]; then
-        mkdir -p "$TEST_TMP/fakebin"
-        # shellcheck disable=SC2030  # each @test runs in its own subshell; PATH export is test-scoped by design
-        export PATH="$TEST_TMP/fakebin:$PATH"
-        # mat2 won't be in PATH, but exiftool might still work
-        # We test the general behavior - if mat2 is missing, script exits 3
-    fi
-    # This test verifies the exit code structure exists
-    run "$TEST_TMP/theduckpurge" --version
-    assert_success
+    # A mat2 stub that fails its own smoke test makes check_dependencies
+    # treat mat2 as unresponsive and abort with exit 3.
+    mkdir -p "$TEST_TMP/fakebin"
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$TEST_TMP/fakebin/mat2"
+    chmod +x "$TEST_TMP/fakebin/mat2"
+    # shellcheck disable=SC2030  # each @test runs in its own subshell; PATH export is test-scoped by design
+    export PATH="$TEST_TMP/fakebin:$PATH"
+    run "$TEST_TMP/theduckpurge" --check-only "$TEST_FILE"
+    assert_failure
+    assert_equal "$status" "3"
+    assert_output --partial "Dependency issues"
 }
 
-# ---- v1.1.0 tests: new features ----
+# ---- Report mode and format support ----
 
 @test "--report shows detailed metadata info" {
     run "$TEST_TMP/theduckpurge" --report "$TEST_FILE"
@@ -405,7 +403,6 @@ CFG
 }
 
 @test "new formats are supported" {
-    # Test that the script recognizes new extensions
     touch "$TEST_TMP/test.heic"
     run "$TEST_TMP/theduckpurge" --check-only "$TEST_TMP/test.heic"
     assert_output --partial "Contains" || assert_output --partial "Already clean"
@@ -425,7 +422,7 @@ CFG
     assert_output --partial '"version"'
 }
 
-# ---- v1.2.0 tests: security audit fixes ----
+# ---- Metadata counting, JSON safety, and robustness ----
 
 @test "--config accepts max-file-size without crashing" {
     cat > "$TEST_TMP/size_config.cfg" << 'CFG'
@@ -557,7 +554,7 @@ CFG
     assert_output --partial "Excluded"
 }
 
-@test "--jobs warns it is not implemented yet" {
+@test "--jobs accepted with warning; runs sequentially" {
     run "$TEST_TMP/theduckpurge" --jobs 4 --check-only "$TEST_FILE"
     assert_success
     assert_output --partial "not implemented"
@@ -643,7 +640,7 @@ run_installer() {
     [[ ! -e "$INSTALL_STUB_TARGET/installed_theduckpurge" ]]
 }
 
-# ============================ hardening (auditoría 2026-08-24) ============================
+# ---- Permission errors, exit codes, and reporting ----
 
 @test "unreadable file yields permission exit code 4" {
     [[ "$(id -u)" == "0" ]] && skip "running as root: chmod 000 is not effective"
