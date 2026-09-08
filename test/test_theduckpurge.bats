@@ -595,12 +595,23 @@ STUB
     cat > "$INST_SANDBOX/bin/sudo" <<'STUB'
 #!/usr/bin/env bash
 if [[ "${1:-}" == "mv" ]]; then
-    exec mv "${2:?}" "${INSTALL_STUB_TARGET:?}/installed_theduckpurge"
+    exec /bin/mv "${2:?}" "${INSTALL_STUB_TARGET:?}/installed_theduckpurge"
 fi
 exec "$@"
 STUB
 
-    chmod +x "$INST_SANDBOX/bin/curl" "$INST_SANDBOX/bin/sudo"
+    # install.sh skips sudo when the target directory is writable (true on
+    # CI runners), so the plain `mv` must land in the sandbox too — the
+    # installer must never touch the real system during tests.
+    cat > "$INST_SANDBOX/bin/mv" <<'STUB'
+#!/usr/bin/env bash
+if [[ "${2:-}" == "/usr/local/bin/theduckpurge" && -n "${INSTALL_STUB_TARGET:-}" ]]; then
+    exec /bin/mv "$1" "$INSTALL_STUB_TARGET/installed_theduckpurge"
+fi
+exec /bin/mv "$@"
+STUB
+
+    chmod +x "$INST_SANDBOX/bin/curl" "$INST_SANDBOX/bin/sudo" "$INST_SANDBOX/bin/mv"
     export INSTALL_STUB_TARGET="$INST_SANDBOX/target"
 }
 
