@@ -244,13 +244,17 @@ teardown() {
 }
 
 @test "aggressive level cleans PDF" {
-    # exiftool < 12.40 (e.g. Ubuntu 22.04's 12.16) cannot rewrite PDFs
-    # produced by that distro's older mat2, so the aggressive exiftool
-    # pass fails there — a known third-party limitation, not a script bug.
-    local ver
-    ver="$(exiftool -ver)"
-    if [[ "$(printf '%s\n' "12.40" "$ver" | sort -V | head -1)" != "12.40" ]]; then
-        skip "exiftool $ver too old for the aggressive PDF pass (distro limitation)"
+    # Capability probe: on some distro toolchains the aggressive exiftool
+    # pass cannot rewrite a mat2-cleaned PDF (e.g. Ubuntu 22.04 ships
+    # mat2 0.12.2 + exiftool 12.40) — a third-party limitation, not a
+    # script bug. Skip when THIS toolchain can't perform the rewrite.
+    local probe cleaned
+    probe="$(mktemp -d "$TEST_TMP/probe.XXXXXX")"
+    cp "$BATS_TEST_DIRNAME/fixtures/test.pdf" "$probe/orig.pdf"
+    mat2 "$probe/orig.pdf" >/dev/null 2>&1 || true
+    cleaned="$probe/orig.cleaned.pdf"
+    if [[ -f "$cleaned" ]] && ! exiftool -overwrite_original -all= "$cleaned" >/dev/null 2>&1; then
+        skip "toolchain can't run the aggressive exiftool pass on mat2-cleaned PDFs"
     fi
     cp "$BATS_TEST_DIRNAME/fixtures/test.pdf" "$TEST_TMP/agg_pdf.pdf"
     run "$TEST_TMP/theduckpurge" --level aggressive "$TEST_TMP/agg_pdf.pdf"
